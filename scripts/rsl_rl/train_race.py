@@ -105,16 +105,39 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
 
-    # TODO ----- START ----- Define rewards scales
-    # reward scales
-    progress_goal_reward_scale = 50.0
-    crash_reward = -1.0
-    death_cost = -10.0
+    # TODO ----- START ----- Define reward scales
+    # Reward structure inspired by Pasumarti (2025), Eq. 4-5:
+    #   r_t = r_prog + r_pass - r_cmd - r_crash
+    #
+    # progress_reward_scale (λ1): rewards closing distance to next gate per timestep.
+    #   Applied as: λ1 * (prev_dist - curr_dist)
+    progress_goal_reward_scale = 0.5      # was 50.0 — paper uses λ1=0.5 on delta-distance
+    crash_reward = -5.0                   # was -1.0 — paper uses 5.0 as crash cost
+    death_cost = -5.0                     # was -10.0 — align with crash penalty
+
+    # gate_pass_reward_scale: bonus for passing through the gate, weighted by
+    #   proximity to gate center: (1.0 - dist_to_center) when crossing gate plane.
+    gate_pass_reward_scale = 1.0
+
+    # command_penalty_scale (λ2): penalizes large actions to encourage smooth flight.
+    #   Applied as: λ2 * ||action||
+    command_penalty_scale = 0.0005
+
+    # command_smooth_penalty_scale (λ3): penalizes abrupt action changes.
+    #   Applied as: λ3 * ||action - prev_action||^2
+    command_smooth_penalty_scale = 0.0002
+
+    # crash_penalty: fixed cost applied on collision (contact sensor trigger).
+    crash_penalty = 5.0
 
     rewards = {
         'progress_goal_reward_scale': progress_goal_reward_scale,
+        'gate_pass_reward_scale': gate_pass_reward_scale,
+        'command_penalty_scale': command_penalty_scale,
         'crash_reward_scale': crash_reward,
         'death_cost': death_cost,
+        'command_smooth_penalty_scale': command_smooth_penalty_scale,
+        'crash_penalty': crash_penalty,
     }
     # TODO ----- END -----
 
