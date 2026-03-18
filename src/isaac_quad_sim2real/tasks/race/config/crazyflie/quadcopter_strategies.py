@@ -71,122 +71,66 @@ class DefaultQuadcopterStrategy:
     # ------------------------------------------------------------------
     # REWARDS
     # ------------------------------------------------------------------
-
     def get_rewards(self) -> torch.Tensor:
-        """
-        Per-timestep reward computation.
-
-        Components (all scales come from train_race.py via self.env.rew):
-
-        1. Progress reward (r_prog):
-               λ1 * (prev_dist - curr_dist)
-           Positive when the drone closes distance to the next gate,
-           negative when it moves away. Uses the distance maintained
-           from the last timestep stored in _last_distance_to_goal.
-
-        2. Gate-pass reward (r_pass):
-               gate_pass_reward_scale * (1 - lateral_dist_in_gate_frame)
-           Awarded once per gate when the drone crosses the gate plane
-           (x-component of _pose_drone_wrt_gate changes sign from + to -)
-           and is within the gate opening. The waypoint index advances
-           and desired position updates here.
-
-        3. Command penalty (r_cmd):
-               λ2 * ||action|| + λ3 * ||action - prev_action||²
-           Encourages smooth, minimal-effort flight.
-
-        4. Crash penalty (r_crash):
-               crash_penalty * crashed_flag
-           Fixed cost when the contact sensor detects a collision.
-
-        5. Death cost: applied on episode termination via reset_terminated.
-        """
 
         # ----------------------------------------------------------------
-        # Gate-crossing detection
+        # Gate-crossing detection (needed in both train and play)
         # ----------------------------------------------------------------
-        # _pose_drone_wrt_gate[:, 0] is the x-coordinate in the gate frame.
-        # The drone starts behind the gate (x > 0). A sign change from
-        # positive to negative means the drone flew through the gate plane.
-        # We additionally require small lateral offset (y, z) to confirm
-        # the drone actually passed through the opening, not around it.
         curr_x_gate = self.env._pose_drone_wrt_gate[:, 0]
         prev_x_gate = self.env._prev_x_drone_wrt_gate
-
-        # Lateral distance from gate center (y-z plane of gate frame)
         lateral_dist = torch.linalg.norm(self.env._pose_drone_wrt_gate[:, 1:3], dim=1)
 
-        # Gate is ~1m wide; allow up to 0.6m lateral error for a pass
         crossed_plane = (prev_x_gate > 0) & (curr_x_gate <= 0)
         within_gate   = lateral_dist < 0.6
         gate_passed   = crossed_plane & within_gate
 
-        # Advance waypoint for environments that passed the gate
         ids_gate_passed = torch.where(gate_passed)[0]
         if len(ids_gate_passed) > 0:
             self.env._idx_wp[ids_gate_passed] = (
                 self.env._idx_wp[ids_gate_passed] + 1
             ) % self.env._waypoints.shape[0]
             self.env._n_gates_passed[ids_gate_passed] += 1
-
-            # Update desired position to new gate
             new_wp = self.env._idx_wp[ids_gate_passed]
             self.env._desired_pos_w[ids_gate_passed, :2] = self.env._waypoints[new_wp, :2]
             self.env._desired_pos_w[ids_gate_passed, 2]  = self.env._waypoints[new_wp, 2]
-
-            # Reset gate-frame pose for next gate
             self.env._pose_drone_wrt_gate[ids_gate_passed], _ = subtract_frame_transforms(
                 self.env._waypoints[new_wp, :3],
                 self.env._waypoints_quat[new_wp, :],
                 self.env._robot.data.root_link_state_w[ids_gate_passed, :3]
             )
 
-        # Update previous x for next timestep
         self.env._prev_x_drone_wrt_gate[:] = curr_x_gate
 
-        # ----------------------------------------------------------------
-        # 1. Progress reward — delta distance to current target gate
-        # ----------------------------------------------------------------
-        curr_dist = torch.linalg.norm(
-            self.env._desired_pos_w - self.env._robot.data.root_link_pos_w, dim=1
-        )
-        delta_dist = self.env._last_distance_to_goal - curr_dist  # positive = moved closer
-        self.env._last_distance_to_goal[:] = curr_dist
-
-        progress_reward = delta_dist * self.env.rew['progress_goal_reward_scale']
-
-        # ----------------------------------------------------------------
-        # 2. Gate-pass reward — bonus scaled by how centered the pass was
-        #    r_pass = gate_pass_reward_scale * (1 - lateral_dist)  if passed
-        # ----------------------------------------------------------------
-        gate_pass_bonus = torch.zeros(self.num_envs, device=self.device)
-        if len(ids_gate_passed) > 0:
-            centering = torch.clamp(1.0 - lateral_dist[ids_gate_passed], 0.0, 1.0)
-            gate_pass_bonus[ids_gate_passed] = centering * self.env.rew['gate_pass_reward_scale']
-
-        # ----------------------------------------------------------------
-        # 3. Command penalty — penalize large / jerky actions
-        # ----------------------------------------------------------------
-        actions     = self.env._actions
-        prev_actions = self.env._previous_actions
-        cmd_penalty = (
-            self.env.rew['command_penalty_scale']        * torch.linalg.norm(actions, dim=1)
-            + self.env.rew['command_smooth_penalty_scale'] * torch.sum((actions - prev_actions) ** 2, dim=1)
-        )
-
-        # ----------------------------------------------------------------
-        # 4. Crash penalty — contact sensor with 100-step grace period
-        # ----------------------------------------------------------------
+        # Crash detection (needed in both modes to update _crashed counter)
         contact_forces = self.env._contact_sensor.data.net_forces_w
         crashed = (torch.norm(contact_forces, dim=-1) > 1e-8).squeeze(1).int()
         mask = (self.env.episode_length_buf > 100).int()
         self.env._crashed = self.env._crashed + crashed * mask
-        crash_reward = crashed.float() * self.env.rew['crash_penalty']
 
-        # ----------------------------------------------------------------
-        # Combine and apply death cost on termination
-        # ----------------------------------------------------------------
+        # Update distance tracking (needed for progress reward next step)
+        curr_dist = torch.linalg.norm(
+            self.env._desired_pos_w - self.env._robot.data.root_link_pos_w, dim=1
+        )
+        delta_dist = self.env._last_distance_to_goal - curr_dist
+        self.env._last_distance_to_goal[:] = curr_dist
+
         if self.cfg.is_train:
+            # All reward scale lookups are safely inside this block
+            progress_reward  = delta_dist * self.env.rew['progress_goal_reward_scale']
+
+            gate_pass_bonus = torch.zeros(self.num_envs, device=self.device)
+            if len(ids_gate_passed) > 0:
+                centering = torch.clamp(1.0 - lateral_dist[ids_gate_passed], 0.0, 1.0)
+                gate_pass_bonus[ids_gate_passed] = centering * self.env.rew['gate_pass_reward_scale']
+
+            actions      = self.env._actions
+            prev_actions = self.env._previous_actions
+            cmd_penalty = (
+                self.env.rew['command_penalty_scale']        * torch.linalg.norm(actions, dim=1)
+                + self.env.rew['command_smooth_penalty_scale'] * torch.sum((actions - prev_actions) ** 2, dim=1)
+            )
+            crash_reward = crashed.float() * self.env.rew['crash_penalty']
+
             rewards_dict = {
                 "progress_goal": progress_reward,
                 "gate_pass":     gate_pass_bonus,
@@ -194,22 +138,18 @@ class DefaultQuadcopterStrategy:
                 "crash":         -crash_reward,
             }
             reward = torch.sum(torch.stack(list(rewards_dict.values())), dim=0)
-
-            # Replace reward with death_cost on terminal steps
             reward = torch.where(
                 self.env.reset_terminated,
                 torch.ones_like(reward) * self.env.rew['death_cost'],
                 reward
             )
-
-            # Logging
             for key, value in rewards_dict.items():
                 self._episode_sums[key] += value
         else:
+            # Play mode — return zero reward, state tracking still updated above
             reward = torch.zeros(self.num_envs, device=self.device)
 
         return reward
-
     # ------------------------------------------------------------------
     # OBSERVATIONS
     # ------------------------------------------------------------------
