@@ -91,6 +91,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     )
 
     # set the environment seed
+    # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
@@ -98,78 +99,53 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
+    # specify directory for logging runs: {time-stamp}_{run_name}
     log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     if agent_cfg.run_name:
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
 
-    # =========================================================================
-    # Reward scales
-    # =========================================================================
-    # Reward structure: r_t = r_prog + r_vel + r_pass - r_cmd - r_crash
+    # TODO ----- START ----- Define reward scales
+    # Reward structure: r_t = r_prog + r_pass - r_cmd - r_crash
     #
-    # Tuning guide (in priority order):
-    #
-    #   1. progress_goal_reward_scale controls how strongly the drone chases
-    #      the next gate.  Too high → shortcutting/hovering near gate.
-    #      Too low → slow convergence.  0.5 is a good starting point.
-    #
-    #   2. velocity_reward_scale is the main speed-up lever.  It rewards
-    #      the forward component of velocity projected onto the gate direction,
-    #      clamped at 15 m/s.  Start at 0.05 and increase once the drone can
-    #      reliably pass all gates — otherwise it learns to fly fast *past*
-    #      gates rather than *through* them.
-    #
-    #   3. gate_pass_reward_scale should be large relative to a single
-    #      timestep of progress reward so gate passing is always worth doing.
-    #      At 100 steps/env and 0.5 progress scale, ~50 units of progress are
-    #      available per episode, so a gate bonus of 5.0 is meaningful but
-    #      not dominant.
-    #
-    #   4. command_penalty_scale and command_smooth_penalty_scale should stay
-    #      small — their main job is preventing oscillatory motor commands
-    #      that cause instability, not limiting speed.
-    #
-    #   5. crash_penalty and death_cost should be large enough that crashing
-    #      is never a preferred strategy, but not so large that the policy
-    #      learns to hover conservatively to avoid any risk of contact.
-    # =========================================================================
+    # progress_goal_reward_scale: rewards closing distance to next gate per timestep
+    #   Applied as: scale * (prev_dist - curr_dist)
+    progress_goal_reward_scale = 5 # 0.5, 1, 5
 
-    # Rewards the drone for closing 3-D distance to the next gate per timestep.
-    progress_goal_reward_scale = 0.5
+    # gate_pass_reward_scale: bonus for passing through the gate center
+    #   Applied as: scale * (1 - lateral_dist_to_center) on gate crossing
+    gate_pass_reward_scale = 10.0 # 2.0, 5.0, 10.0
 
-    # Rewards forward velocity projected onto the drone→gate unit vector.
-    # Clamped at 15 m/s.  Increase once gate-passing is stable.
-    velocity_reward_scale = 0.05
-
-    # One-time bonus per gate passed, weighted by centering (0 = edge, 1 = center).
-    gate_pass_reward_scale = 5.0
-
-    # Penalizes large motor commands.  Keeps flight smooth and power-efficient.
+    # command_penalty_scale: penalizes large actions (encourages smooth flight)
     command_penalty_scale = 0.0005
 
-    # Penalizes abrupt action changes (action jerk).  Reduces oscillations.
+    # command_smooth_penalty_scale: penalizes abrupt action changes
     command_smooth_penalty_scale = 0.0002
 
-    # Fixed penalty applied on each timestep a contact force is detected
-    # (only after episode step 100 to avoid penalizing reset physics).
-    crash_penalty = 5.0
+    # alive_bonus_scale: small reward per step for not crashing
+    # Ensures cumulative episode reward is positive so best_model.pt is saved.
+    # A 50-step episode still nets: 50*0.1 - death_cost(1.0) = +4.0
+    alive_bonus_scale = 0.01 # 0.1, 0.05
 
-    # Replaces the full reward on terminal transitions (crash / out-of-bounds).
-    death_cost = -5.0
+    # crash_penalty: fixed cost on collision detection
+    crash_penalty = 1.0
+
+    # death_cost: applied on episode termination (crash/out-of-bounds)
+    death_cost = -1.0
 
     rewards = {
-        'progress_goal_reward_scale':    progress_goal_reward_scale,
-        'velocity_reward_scale':         velocity_reward_scale,
-        'gate_pass_reward_scale':        gate_pass_reward_scale,
-        'command_penalty_scale':         command_penalty_scale,
-        'command_smooth_penalty_scale':  command_smooth_penalty_scale,
-        'crash_penalty':                 crash_penalty,
-        'death_cost':                    death_cost,
+        'progress_goal_reward_scale': progress_goal_reward_scale,
+        'gate_pass_reward_scale': gate_pass_reward_scale,
+        'command_penalty_scale': command_penalty_scale,
+        'command_smooth_penalty_scale': command_smooth_penalty_scale,
+        'alive_bonus_scale': alive_bonus_scale,
+        'crash_penalty': crash_penalty,
+        'death_cost': death_cost,
     }
+    # TODO ----- END -----
 
     env_cfg.is_train = True
-    env_cfg.rewards  = rewards
+    env_cfg.rewards = rewards
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None, rewards=rewards)
@@ -204,12 +180,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # load the checkpoint
     if agent_cfg.resume:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+        # load previously trained model
         runner.load(resume_path)
 
     # dump the configuration into log-directory
-    dump_yaml(os.path.join(log_dir, "params", "env.yaml"),    env_cfg)
-    dump_yaml(os.path.join(log_dir, "params", "agent.yaml"),  agent_cfg)
-    dump_pickle(os.path.join(log_dir, "params", "env.pkl"),   env_cfg)
+    dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
+    dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    dump_pickle(os.path.join(log_dir, "params", "env.pkl"), env_cfg)
     dump_pickle(os.path.join(log_dir, "params", "agent.pkl"), agent_cfg)
 
     # run training
@@ -220,5 +197,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 
 if __name__ == "__main__":
+    # run the main function
     main()
+    # close sim app
     simulation_app.close()
