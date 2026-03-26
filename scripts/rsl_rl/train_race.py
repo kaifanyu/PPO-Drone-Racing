@@ -72,7 +72,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
 
 # Import extensions to set up environment tasks
-import isaac_quad_sim2real.tasks   # noqa: F401
+import src.isaac_quad_sim2real.tasks   # noqa: F401
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -106,41 +106,40 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_dir = os.path.join(log_root_path, log_dir)
 
     # TODO ----- START ----- Define reward scales
-    # Reward structure: r_t = r_prog + r_pass - r_cmd - r_crash
-    #
-    # progress_goal_reward_scale: rewards closing distance to next gate per timestep
+    # progress_goal_reward_scale: dense reward for closing distance to current gate
     #   Applied as: scale * (prev_dist - curr_dist)
-    progress_goal_reward_scale = 5 # 0.5, 1, 5
-
-    # gate_pass_reward_scale: bonus for passing through the gate center
-    #   Applied as: scale * (1 - lateral_dist_to_center) on gate crossing
-    gate_pass_reward_scale = 10.0 # 2.0, 5.0, 10.0
-
-    # command_penalty_scale: penalizes large actions (encourages smooth flight)
+    progress_goal_reward_scale = 5.0
+ 
+    # target_reached_bonus_reward_scale:
+    #   +scale * centering_weight  on gate pass (0–1, 1=dead centre)
+    #   -scale * 1.0               on gate miss
+    target_reached_bonus_reward_scale = 10.0
+ 
+    # command_penalty_scale: penalizes large actions (smooth flight)
     command_penalty_scale = 0.0005
-
+ 
     # command_smooth_penalty_scale: penalizes abrupt action changes
     command_smooth_penalty_scale = 0.0002
-
-    # alive_bonus_scale: small reward per step for not crashing
-    # Ensures cumulative episode reward is positive so best_model.pt is saved.
-    # A 50-step episode still nets: 50*0.1 - death_cost(1.0) = +4.0
-    alive_bonus_scale = 0.01 # 0.1, 0.05
-
-    # crash_penalty: fixed cost on collision detection
-    crash_penalty = 1.0
-
-    # death_cost: applied on episode termination (crash/out-of-bounds)
+ 
+    # alive_bonus_scale: small per-step survival reward
+    #   Ensures cumulative episode reward is positive so best_model.pt is saved.
+    alive_bonus_scale = 0.01
+ 
+    # lap_incomplete_penalty_reward_scale: per-step penalty until 3 laps complete
+    #   Negative value — set how aggressively you want to push toward full laps.
+    lap_incomplete_penalty_reward_scale = -0.01
+ 
+    # death_cost: overrides all reward components on crash/OOB termination
     death_cost = -1.0
-
+ 
     rewards = {
-        'progress_goal_reward_scale': progress_goal_reward_scale,
-        'gate_pass_reward_scale': gate_pass_reward_scale,
-        'command_penalty_scale': command_penalty_scale,
-        'command_smooth_penalty_scale': command_smooth_penalty_scale,
-        'alive_bonus_scale': alive_bonus_scale,
-        'crash_penalty': crash_penalty,
-        'death_cost': death_cost,
+        "progress_goal_reward_scale":            progress_goal_reward_scale,
+        "target_reached_bonus_reward_scale":     target_reached_bonus_reward_scale,
+        "command_penalty_scale":                 command_penalty_scale,
+        "command_smooth_penalty_scale":          command_smooth_penalty_scale,
+        "alive_bonus_scale":                     alive_bonus_scale,
+        "lap_incomplete_penalty_reward_scale":   lap_incomplete_penalty_reward_scale,
+        "death_cost":                            death_cost,
     }
     # TODO ----- END -----
 
