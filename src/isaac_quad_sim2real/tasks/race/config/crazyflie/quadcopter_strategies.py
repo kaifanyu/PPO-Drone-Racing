@@ -63,6 +63,15 @@ class DefaultQuadcopterStrategy:
 
     See module docstring for a full description of design choices.
     """
+    DEFAULT_REWARDS = {
+        "progress_goal_reward_scale":            5.0,
+        "target_reached_bonus_reward_scale":     10.0,
+        "command_penalty_scale":                 0.0005,
+        "command_smooth_penalty_scale":          0.0002,
+        "alive_bonus_scale":                     0.01,
+        "lap_incomplete_penalty_reward_scale":   -0.01,
+        "death_cost":                            -1.0,
+    }
 
     # ------------------------------------------------------------------
     # Construction
@@ -70,6 +79,8 @@ class DefaultQuadcopterStrategy:
 
     def __init__(self, env: "QuadcopterEnv"):
         self.env = env
+        if not hasattr(env, "rew") or env.rew is None:
+            env.rew = dict(self.DEFAULT_REWARDS)
         self.device = env.device
         self.num_envs = env.num_envs
         self.cfg = env.cfg
