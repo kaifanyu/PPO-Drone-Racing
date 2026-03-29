@@ -685,10 +685,28 @@ class QuadcopterEnv(DirectRLEnv):
         )
 
         # timeout conditions
-        time_out = self.episode_length_buf >= self.max_episode_length - 1
-        if not self.cfg.is_train:
-            time_out = time_out | ((self._n_gates_passed - 1) // (self._waypoints.shape[0]) >= self.cfg.max_n_laps)
+        # time_out = self.episode_length_buf >= self.max_episode_length - 1
+        # if not self.cfg.is_train:
+        #     time_out = time_out | ((self._n_gates_passed - 1) // (self._waypoints.shape[0]) >= self.cfg.max_n_laps)
 
+
+        if self.cfg.is_train:
+            # Training: reset only on death or crash (no timeouts unless specified)
+            died = (cond_max_h | cond_h_min_time | cond_crashed)
+
+            if self.cfg.reset_time is not None:
+                time_out = self.episode_length_buf >= self.cfg.reset_time - 1
+            else:
+                # Track max_episode_length timeouts even when reset_time is None
+                time_out = self.episode_length_buf >= self.max_episode_length - 1
+        else:
+            # Eval / play mode:
+            time_out_len = self.episode_length_buf >= self.max_episode_length - 1
+            time_out_laps = ((self._n_gates_passed - 1) // (self._waypoints.shape[0]) >= self.cfg.max_n_laps)
+            time_out = time_out_laps
+
+            died = (cond_max_h | cond_h_min_time | cond_crashed | time_out_len)
+            
         return died, time_out
 
     def _get_rewards(self) -> torch.Tensor:

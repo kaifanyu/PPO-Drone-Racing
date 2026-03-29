@@ -11,11 +11,327 @@ import torch.optim as optim
 
 from rsl_rl.modules import ActorCritic
 from rsl_rl.storage import RolloutStorage
+# Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
 
+
+from torch.distributions import Normal
+
+
+class ActorCriticLSTM(nn.Module):
+    """Actor-Critic with LSTM for both actor and critic.
+
+    Replaces the MLP-based ActorCritic from rsl_rl.modules.
+    Drop-in compatible with the PPO class — satisfies all method/attribute
+    contracts that ppo.py depends on:
+
+        act(), evaluate(), get_actions_log_prob(), get_hidden_states(),
+        reset(), entropy, action_mean, action_std, is_recurrent
+    """
+
+    is_recurrent: bool = True  # Tells PPO to use recurrent_mini_batch_generator
+
+    def __init__(
+        self,
+        num_actor_obs: int,
+        num_critic_obs: int,
+        num_actions: int,
+        # LSTM config
+        lstm_hidden_size: int = 256,
+        lstm_num_layers: int = 1,
+        # MLP heads on top of LSTM output
+        actor_hidden_dims: list[int] = [128, 64],
+        critic_hidden_dims: list[int] = [128, 64],
+        activation: str = "elu",
+        # Action distribution init
+        init_noise_std: float = 1.0,
+    ):
+        super().__init__()
+
+        activation_fn = _get_activation(activation)
+
+        # ----------------------------------------------------------------
+        # ACTOR: LSTM backbone + MLP head
+        # ----------------------------------------------------------------
+        self.actor_lstm = nn.LSTM(
+            input_size=num_actor_obs,
+            hidden_size=lstm_hidden_size,
+            num_layers=lstm_num_layers,
+            batch_first=True,  # input shape: (batch, seq, features)
+        )
+
+        actor_layers = []
+        in_size = lstm_hidden_size
+        for out_size in actor_hidden_dims:
+            actor_layers += [nn.Linear(in_size, out_size), activation_fn()]
+            in_size = out_size
+        actor_layers.append(nn.Linear(in_size, num_actions))
+        self.actor_head = nn.Sequential(*actor_layers)
+
+        # ----------------------------------------------------------------
+        # CRITIC: LSTM backbone + MLP head
+        #
+        # TIP: If your critic receives *privileged* (full-state) observations
+        #      replace the LSTM with a plain MLP:
+        #
+        #      self.critic_lstm = None
+        #      self.critic_mlp  = nn.Sequential(nn.Linear(num_critic_obs, 256),
+        #                                        ELU(), nn.Linear(256, 128),
+        #                                        ELU(), nn.Linear(128, 1))
+        #
+        # and update evaluate() accordingly.
+        # ----------------------------------------------------------------
+        self.critic_lstm = nn.LSTM(
+            input_size=num_critic_obs,
+            hidden_size=lstm_hidden_size,
+            num_layers=lstm_num_layers,
+            batch_first=True,
+        )
+
+        critic_layers = []
+        in_size = lstm_hidden_size
+        for out_size in critic_hidden_dims:
+            critic_layers += [nn.Linear(in_size, out_size), activation_fn()]
+            in_size = out_size
+        critic_layers.append(nn.Linear(in_size, 1))
+        self.critic_head = nn.Sequential(*critic_layers)
+
+        # ----------------------------------------------------------------
+        # Action distribution parameters
+        # ----------------------------------------------------------------
+        self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+        self.distribution = None
+
+        # ----------------------------------------------------------------
+        # Hidden state storage  (num_layers, num_envs, hidden_size)
+        # Initialised lazily in _init_hidden() on first forward pass.
+        # ----------------------------------------------------------------
+        self._actor_hidden: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._critic_hidden: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._num_layers = lstm_num_layers
+        self._hidden_size = lstm_hidden_size
+        self._device = "cpu"
+
+        # Cached distribution statistics (set by act / evaluate)
+        self.action_mean: torch.Tensor = None
+        self.action_std: torch.Tensor = None
+        self.entropy: torch.Tensor = None
+
+    # ------------------------------------------------------------------
+    # Initialisation helpers
+    # ------------------------------------------------------------------
+
+    def _init_hidden(self, batch_size: int, device: torch.device):
+        """Return a zeroed (h, c) pair for the given batch size."""
+        h = torch.zeros(self._num_layers, batch_size, self._hidden_size, device=device)
+        c = torch.zeros(self._num_layers, batch_size, self._hidden_size, device=device)
+        return h, c
+
+    def to(self, *args, **kwargs):
+        result = super().to(*args, **kwargs)
+        # Track device so we can init hidden states on the right device
+        if args:
+            self._device = args[0]
+        return result
+
+    # ------------------------------------------------------------------
+    # PPO interface — act()
+    # ------------------------------------------------------------------
+
+    def act(
+        self,
+        observations: torch.Tensor,
+        hidden_states: tuple | None = None,
+        masks: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Sample actions from the current policy.
+
+        Args:
+            observations: shape (batch, num_actor_obs)  — single time-step
+            hidden_states: optional tuple of (actor_hc, critic_hc) from
+                           get_hidden_states(); used during PPO update to
+                           restore collection-time context.
+            masks: episode masks for resetting hidden state at boundaries
+                   shape (batch,); 1 = alive, 0 = episode just ended.
+
+        Returns:
+            Sampled actions, shape (batch, num_actions).
+        """
+        device = observations.device
+        batch_size = observations.shape[0]
+
+        # Restore or initialise actor hidden state
+        if hidden_states is not None:
+            actor_hc = hidden_states[0]
+        else:
+            if self._actor_hidden is None or self._actor_hidden[0].shape[1] != batch_size:
+                self._actor_hidden = self._init_hidden(batch_size, device)
+            actor_hc = self._actor_hidden
+
+        # Apply episode masks to reset finished environments
+        if masks is not None:
+            actor_hc = _apply_masks(actor_hc, masks)
+
+        # LSTM forward — add seq_len=1 dimension
+        obs_seq = observations.unsqueeze(1)  # (batch, 1, obs_dim)
+        lstm_out, actor_hc = self.actor_lstm(obs_seq, actor_hc)
+        lstm_out = lstm_out.squeeze(1)  # (batch, hidden_size)
+
+        # Store updated hidden state for next step
+        self._actor_hidden = actor_hc
+
+        # Compute action mean via MLP head
+        mean = self.actor_head(lstm_out)
+        std = self.std.expand_as(mean)
+
+        # Build distribution and sample
+        self.distribution = Normal(mean, std)
+        self.action_mean = mean
+        self.action_std = std
+
+        return self.distribution.sample()
+
+    # ------------------------------------------------------------------
+    # PPO interface — evaluate()
+    # ------------------------------------------------------------------
+
+    def evaluate(
+        self,
+        critic_observations: torch.Tensor,
+        hidden_states: tuple | None = None,
+        masks: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute state values V(s).
+
+        Args:
+            critic_observations: shape (batch, num_critic_obs)
+            hidden_states: optional tuple (actor_hc, critic_hc)
+            masks: episode masks, shape (batch,)
+
+        Returns:
+            Values, shape (batch, 1).
+        """
+        device = critic_observations.device
+        batch_size = critic_observations.shape[0]
+
+        if hidden_states is not None:
+            critic_hc = hidden_states[1]
+        else:
+            if self._critic_hidden is None or self._critic_hidden[0].shape[1] != batch_size:
+                self._critic_hidden = self._init_hidden(batch_size, device)
+            critic_hc = self._critic_hidden
+
+        if masks is not None:
+            critic_hc = _apply_masks(critic_hc, masks)
+
+        obs_seq = critic_observations.unsqueeze(1)  # (batch, 1, obs_dim)
+        lstm_out, critic_hc = self.critic_lstm(obs_seq, critic_hc)
+        lstm_out = lstm_out.squeeze(1)
+
+        self._critic_hidden = critic_hc
+
+        return self.critic_head(lstm_out)
+
+    # ------------------------------------------------------------------
+    # PPO interface — distribution utilities
+    # ------------------------------------------------------------------
+
+    def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
+        """Log-probability of *actions* under the last computed distribution."""
+        assert self.distribution is not None, "Call act() before get_actions_log_prob()"
+        log_prob = self.distribution.log_prob(actions).sum(dim=-1)
+        self.entropy = self.distribution.entropy().sum(dim=-1)
+        return log_prob
+
+    # ------------------------------------------------------------------
+    # PPO interface — recurrent state management
+    # ------------------------------------------------------------------
+
+    def get_hidden_states(self) -> tuple:
+        """Return a snapshot of (actor_hc, critic_hc) for storage.
+
+        Called by PPO.act() before every environment step so the rollout
+        buffer can record the hidden state at collection time — needed to
+        reproduce the same LSTM context during the update phase.
+        """
+        return (self._actor_hidden, self._critic_hidden)
+
+    def reset(self, dones: torch.Tensor | None = None):
+        """Reset hidden states for finished environments.
+
+        Args:
+            dones: bool tensor, shape (num_envs,). True = episode just ended.
+                   If None, reset all environments.
+        """
+        if dones is None:
+            self._actor_hidden = None
+            self._critic_hidden = None
+            return
+
+        if self._actor_hidden is not None:
+            self._actor_hidden = _apply_masks(self._actor_hidden, ~dones.bool())
+        if self._critic_hidden is not None:
+            self._critic_hidden = _apply_masks(self._critic_hidden, ~dones.bool())
+
+    # ------------------------------------------------------------------
+    # Train / test mode helpers (called by PPO.train_mode / test_mode)
+    # ------------------------------------------------------------------
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        return self
+
+    def test(self):
+        self.eval()
+
+
+# ======================================================================
+# Utility functions
+# ======================================================================
+
+def _apply_masks(
+    hc: tuple[torch.Tensor, torch.Tensor],
+    masks: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Zero out hidden/cell states for environments where mask == 0.
+
+    Args:
+        hc:    (h, c) tensors of shape (num_layers, batch, hidden)
+        masks: 1-D float/bool tensor of shape (batch,)
+               1 (or True)  = keep state
+               0 (or False) = reset to zero
+    """
+    h, c = hc
+    m = masks.float().view(1, -1, 1)  # broadcast over layers & hidden dim
+    return h * m, c * m
+
+
+def _get_activation(name: str) -> type:
+    activations = {
+        "elu":    nn.ELU,
+        "relu":   nn.ReLU,
+        "tanh":   nn.Tanh,
+        "sigmoid": nn.Sigmoid,
+        "selu":   nn.SELU,
+        "leaky_relu": nn.LeakyReLU,
+    }
+    if name not in activations:
+        raise ValueError(f"Unknown activation '{name}'. Choose from: {list(activations)}")
+    return activations[name]
 
 class PPO:
     """Proximal Policy Optimization algorithm (https://arxiv.org/abs/1707.06347)."""
-
+    # actor_critic = ActorCriticLSTM(
+    #     num_actor_obs=48,        # your obs dim
+    #     num_critic_obs=48,       # can differ if using privileged obs
+    #     num_actions=12,          # your action dim
+    #     lstm_hidden_size=256,
+    #     lstm_num_layers=1,
+    #     actor_hidden_dims=[128, 64],
+    #     critic_hidden_dims=[128, 64],
+    # )
     actor_critic: ActorCritic
     """The actor critic module."""
 

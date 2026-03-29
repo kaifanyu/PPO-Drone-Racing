@@ -10,14 +10,19 @@
 import sys
 import os
 
-local_rsl_path = os.path.abspath("src/third_parties/rsl_rl_local")
-if os.path.exists(local_rsl_path):
-    sys.path.insert(0, local_rsl_path)
-    print(f"[INFO] Using local rsl_rl from: {local_rsl_path}")
-else:
-    print(f"[WARNING] Local rsl_rl not found at: {local_rsl_path}")
+# Add project root to Python path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+    print(f"[INFO] Added project root to path: {project_root}")
 
-from rsl_rl.utils import wandb_fix
+rsl_rl_path = os.path.abspath(os.path.join(project_root, "src/third_parties/rsl_rl_local"))
+if os.path.exists(rsl_rl_path):
+    sys.path.insert(0, rsl_rl_path)
+    print(f"[INFO] Using rsl_rl from: {rsl_rl_path}")
+else:
+    print(f"[WARNING] rsl_rl not found at: {rsl_rl_path}")
+
 import argparse
 from isaaclab.app import AppLauncher
 import cli_args
@@ -31,6 +36,20 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+# reward scaling overrides (optional)
+parser.add_argument("--progress_scale", type=float, default=None, help="Override progress_goal_reward_scale.")
+parser.add_argument("--target_bonus_scale", type=float, default=None, help="Override target_reached_bonus_reward_scale.")
+parser.add_argument("--crash_scale", type=float, default=None, help="Override crash_reward_scale.")
+parser.add_argument("--death_cost", type=float, default=None, help="Override death_cost.")
+parser.add_argument("--lap_penalty_scale", type=float, default=None, help="Per-step penalty until 3 laps complete.")
+parser.add_argument("--roll_pitch_rates_scale", type=float, default=None, help="Penalty for aggressive roll/pitch rates. Recommended: -0.5 to -2.0")
+parser.add_argument("--yaw_rate_scale", type=float, default=None, help="Penalty for aggressive yaw rate. Recommended: -0.25 to -1.0")
+parser.add_argument("--thrust_to_weight", type=float, default=None, help="Override thrust-to-weight ratio. Default: 3.15")
+parser.add_argument("--name", type=str, default=None, help="Override run folder name under logs/rsl_rl/<experiment>.")
+parser.add_argument("--reset_time", type=int, default=None, help="Max episode length (in policy steps) for reset. None = no timeout (use full episode_length_s).")
+
+parser.add_argument("--wrong_direction_penalty", type=float, default=None)
+parser.add_argument("--out_of_order_gate_penalty", type=float, default=None)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -90,6 +109,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
 
+    # Enable Weights & Biases logging by default and set a default project name
+    if getattr(agent_cfg, "logger", None) is None:
+        agent_cfg.logger = "wandb"
+    if agent_cfg.logger == "wandb" and not getattr(agent_cfg, "wandb_project", None):
+        agent_cfg.wandb_project = "isaac-quad-race"
+
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
@@ -99,52 +124,60 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    # specify directory for logging runs: {time-stamp}_{run_name}
-    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    if agent_cfg.run_name:
-        log_dir += f"_{agent_cfg.run_name}"
-    log_dir = os.path.join(log_root_path, log_dir)
+    # specify directory for logging runs
+    if args_cli.name:
+        # Use explicit name when provided
+        log_dir = os.path.join(log_root_path, args_cli.name)
+    else:
+        # Default: {time-stamp}_{run_name}
+        log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        if agent_cfg.run_name:
+            log_dir += f"_{agent_cfg.run_name}"
+        log_dir = os.path.join(log_root_path, log_dir)
 
-    # TODO ----- START ----- Define reward scales
-    # progress_goal_reward_scale: dense reward for closing distance to current gate
-    #   Applied as: scale * (prev_dist - curr_dist)
-    progress_goal_reward_scale = 5.0
- 
-    # target_reached_bonus_reward_scale:
-    #   +scale * centering_weight  on gate pass (0–1, 1=dead centre)
-    #   -scale * 1.0               on gate miss
-    target_reached_bonus_reward_scale = 10.0
- 
-    # command_penalty_scale: penalizes large actions (smooth flight)
-    command_penalty_scale = 0.0005
- 
-    # command_smooth_penalty_scale: penalizes abrupt action changes
-    command_smooth_penalty_scale = 0.0002
- 
-    # alive_bonus_scale: small per-step survival reward
-    #   Ensures cumulative episode reward is positive so best_model.pt is saved.
-    alive_bonus_scale = 0.01
- 
-    # lap_incomplete_penalty_reward_scale: per-step penalty until 3 laps complete
-    #   Negative value — set how aggressively you want to push toward full laps.
+    # TODO ----- START ----- Define rewards scales
+    # reward scales - override with CLI arguments
+    progress_goal_reward_scale = 20.0
+    target_reached_bonus_reward_scale = 400.0
+    death_cost = -500.0
     lap_incomplete_penalty_reward_scale = -0.01
- 
-    # death_cost: overrides all reward components on crash/OOB termination
-    death_cost = -1.0
- 
+    roll_pitch_rates_reward_scale = -1  # Penalty for aggressive roll/pitch rates
+    yaw_rate_reward_scale = -0.5  # Penalty for aggressive yaw rate
+
+    # CLI overrides for reward scaling
+    if args_cli.progress_scale is not None:
+        progress_goal_reward_scale = float(args_cli.progress_scale)
+    if args_cli.target_bonus_scale is not None:
+        target_reached_bonus_reward_scale = float(args_cli.target_bonus_scale)
+    if args_cli.death_cost is not None:
+        death_cost = float(args_cli.death_cost)
+    if args_cli.lap_penalty_scale is not None:
+        lap_incomplete_penalty_reward_scale = float(args_cli.lap_penalty_scale)
+    if args_cli.roll_pitch_rates_scale is not None:
+        roll_pitch_rates_reward_scale = float(args_cli.roll_pitch_rates_scale)
+    if args_cli.yaw_rate_scale is not None:
+        yaw_rate_reward_scale = float(args_cli.yaw_rate_scale)
+
     rewards = {
-        "progress_goal_reward_scale":            progress_goal_reward_scale,
-        "target_reached_bonus_reward_scale":     target_reached_bonus_reward_scale,
-        "command_penalty_scale":                 command_penalty_scale,
-        "command_smooth_penalty_scale":          command_smooth_penalty_scale,
-        "alive_bonus_scale":                     alive_bonus_scale,
-        "lap_incomplete_penalty_reward_scale":   lap_incomplete_penalty_reward_scale,
-        "death_cost":                            death_cost,
+        'progress_goal_reward_scale': progress_goal_reward_scale,
+        'target_reached_bonus_reward_scale': target_reached_bonus_reward_scale,
+        'death_cost': death_cost,
+        'lap_incomplete_penalty_reward_scale': lap_incomplete_penalty_reward_scale,
+        'roll_pitch_rates_reward_scale': roll_pitch_rates_reward_scale,
+        'yaw_rate_reward_scale': yaw_rate_reward_scale,
+        'wrong_direction_penalty': -300.0,   # hitting a gate from the wrong side
+        'out_of_order_gate_penalty': -200.0, # passing any gate other than the current target
     }
     # TODO ----- END -----
 
     env_cfg.is_train = True
     env_cfg.rewards = rewards
+    env_cfg.reset_time = args_cli.reset_time
+
+    # Override thrust_to_weight if specified
+    if args_cli.thrust_to_weight is not None:
+        env_cfg.thrust_to_weight = args_cli.thrust_to_weight
+        print(f"[INFO] Using thrust_to_weight = {args_cli.thrust_to_weight}")
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None, rewards=rewards)
@@ -197,6 +230,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 if __name__ == "__main__":
     # run the main function
-    main()
+    main()  # type: ignore
     # close sim app
     simulation_app.close()
