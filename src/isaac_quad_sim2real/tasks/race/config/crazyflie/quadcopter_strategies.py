@@ -520,8 +520,7 @@ class DefaultQuadcopterStrategy:
 
         # store for next timestep
         self._prev_pose_drone_wrt_prev_gate = current_pose_prev_gate.clone()
-
-        # compute final reward
+        
         if self.cfg.is_train:
             # Scale each reward 
             progress_reward = progress * self.env.rew['progress_goal_reward_scale']
@@ -543,6 +542,17 @@ class DefaultQuadcopterStrategy:
             wrong_direction = (gate_crossed_backward | prev_gate_crossed_backward).float()
             backward_penalty = wrong_direction * self.env.rew.get('wrong_direction_penalty', -200.0)
 
+            # ---- ADD THESE LINES ----
+            # Reward velocity component pointing directly at current gate center.
+            # Clamped to 0 so flying away from a gate is not double-penalized here.
+            vel_w = self.env._robot.data.root_com_lin_vel_w
+            gate_dir = gate_centers - self.env._robot.data.root_link_pos_w
+            gate_dist = torch.norm(gate_dir, dim=1, keepdim=True).clamp(min=0.1)
+            gate_dir_unit = gate_dir / gate_dist
+            vel_toward_gate = (vel_w * gate_dir_unit).sum(dim=1).clamp(min=0.0)
+            velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
+            # ---- END ADDED LINES ----
+
             # Aggregate all components
             rewards = {
                 "progress_goal": progress_reward,
@@ -550,7 +560,8 @@ class DefaultQuadcopterStrategy:
                 "lap_incomplete_penalty": lap_penalty,
                 "roll_pitch_rates": roll_pitch_rates_penalty,
                 "yaw_rate": yaw_rate_penalty,
-                "backward_crossing":    backward_penalty,   # ← ADD THIS
+                "backward_crossing": backward_penalty,
+                "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             
