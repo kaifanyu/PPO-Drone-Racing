@@ -176,7 +176,7 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["backward_crossing", "lap_time_bonus", "gate_crossing_speed_bonus", "min_speed_penalty"]  # adds extra backwards_crossing key 
+            extra_keys = ["backward_crossing", "lap_time_bonus"]  # adds extra backwards_crossing key 
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -561,7 +561,7 @@ class DefaultQuadcopterStrategy:
             next_gate_dir_unit = next_gate_dir / next_gate_dist
 
             # 80% toward current gate, 20% toward next — tightens corner anticipation
-            blended_dir = 0.8 * gate_dir_unit + 0.2 * next_gate_dir_unit
+            blended_dir = 0.7 * gate_dir_unit + 0.3 * next_gate_dir_unit
             blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
 
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
@@ -578,14 +578,7 @@ class DefaultQuadcopterStrategy:
             time_remaining = 1.0 - (self.env.episode_length_buf.float() / self.env.max_episode_length)
             lap_time_bonus = new_lap_completed * time_remaining * self.env.rew['lap_time_bonus_scale']
             # ---- END ADDED LINES ----
-            drone_speed = torch.norm(self.env._robot.data.root_com_lin_vel_w, dim=1)
-            gate_crossing_speed_bonus = gate_passed.float() * drone_speed * self.env.rew['gate_crossing_speed_scale']
 
-            # Penalize dropping below minimum speed — prevents unnecessary deceleration
-            # between gates on straightaways. Clamp so no reward for going fast here.
-            speed_deficit = (4.0 - drone_speed).clamp(min=0.0)
-            min_speed_penalty = speed_deficit * self.env.rew['min_speed_penalty_scale']
-            # ---- END ADDED LINES ----
             # Aggregate all components
             rewards = {
                 "progress_goal": progress_reward,
@@ -596,8 +589,6 @@ class DefaultQuadcopterStrategy:
                 "backward_crossing": backward_penalty,
                 "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
                 "lap_time_bonus": lap_time_bonus,    # <-- ADD THIS
-                "gate_crossing_speed_bonus": gate_crossing_speed_bonus,   # <-- ADD
-                "min_speed_penalty": min_speed_penalty,                   # <-- ADD
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             
@@ -938,4 +929,3 @@ class DefaultQuadcopterStrategy:
         self._prev_distance_to_gate[env_ids_tensor] = torch.norm(drone_pos - gate_pos, dim=1)
 
         self.env._crashed[env_ids_tensor] = 0
-        
