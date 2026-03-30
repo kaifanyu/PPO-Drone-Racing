@@ -169,6 +169,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'out_of_order_gate_penalty': -350.0, # passing any gate other than the current target
         'velocity_toward_gate_reward_scale': 4.5,   # <-- ADD THIS
         'lap_time_bonus_scale': 500.0,   # <-- ADD THIS
+        'gate_crossing_speed_scale': 60.0,    # <-- ADD THIS
+        'min_speed_penalty_scale': -1.5,      # <-- ADD THIS
     }
     # TODO ----- END -----
 
