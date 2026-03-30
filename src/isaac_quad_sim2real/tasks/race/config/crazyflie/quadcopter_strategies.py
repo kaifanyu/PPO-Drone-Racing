@@ -546,12 +546,24 @@ class DefaultQuadcopterStrategy:
             # Reward velocity component pointing directly at current gate center.
             # Clamped to 0 so flying away from a gate is not double-penalized here.
             vel_w = self.env._robot.data.root_com_lin_vel_w
+            # Replace your current velocity reward block with this
+            next_gate_centers = self.env._waypoints[next_gate_indices, :3]
+
             gate_dir = gate_centers - self.env._robot.data.root_link_pos_w
+            next_gate_dir = next_gate_centers - self.env._robot.data.root_link_pos_w
+
             gate_dist = torch.norm(gate_dir, dim=1, keepdim=True).clamp(min=0.1)
+            next_gate_dist = torch.norm(next_gate_dir, dim=1, keepdim=True).clamp(min=0.1)
+
             gate_dir_unit = gate_dir / gate_dist
-            vel_toward_gate = (vel_w * gate_dir_unit).sum(dim=1).clamp(min=0.0)
+            next_gate_dir_unit = next_gate_dir / next_gate_dist
+
+            # 80% toward current gate, 20% toward next — tightens corner anticipation
+            blended_dir = 0.8 * gate_dir_unit + 0.2 * next_gate_dir_unit
+            blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
+
+            vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
             velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
-            # ---- END ADDED LINES ----
 
             # Aggregate all components
             rewards = {
