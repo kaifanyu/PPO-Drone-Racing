@@ -236,6 +236,20 @@ class DefaultQuadcopterStrategy:
             noise_std=noise_std
         )
 
+        # ↓ ADD RIGHT HERE, after _reset_buffer is constructed ↓
+        LOOP_GATE_ID = 3
+        via_pos = torch.tensor(
+            [0.8, -1.5, 3.2],
+            dtype=torch.float32, device=self.device
+        )
+        approach_vel = torch.tensor(
+            [-3.0, -4.0, -0.5],
+            dtype=torch.float32, device=self.device
+        )
+        self._seed_loop_buffer(LOOP_GATE_ID, via_pos, approach_vel)
+        print(f"[INFO] Gate {LOOP_GATE_ID} buffer seeded with {self._reset_buffer.get_count(LOOP_GATE_ID)} states")
+
+
     def _randomize_dynamics(self, env_ids: torch.Tensor):
         """Randomize dynamics parameters for specified environments.
         
@@ -275,6 +289,39 @@ class DefaultQuadcopterStrategy:
         
         # Motor time constants: use fixed base value (no randomization)
         self.env._tau_m[env_ids] = self.env._tau_m_value
+
+    def _seed_loop_buffer(self, loop_gate_id: int, via_pos: torch.Tensor, approach_vel: torch.Tensor):
+        """
+        Manually inject states into the reset buffer for a gate that requires a
+        non-obvious trajectory (e.g. looping above gate 4).  Call once from __init__.
+
+        Args:
+            loop_gate_id:  the gate index whose buffer we seed (e.g. 3 = gate before the loop)
+            via_pos:       world-frame position drone should be at when it enters the loop (tensor [3])
+            approach_vel:  velocity vector pointing along the correct approach arc (tensor [3])
+        """
+        yaw = torch.atan2(approach_vel[1], approach_vel[0])
+        quat = quat_from_euler_xyz(
+            torch.zeros(1, device=self.device),
+            torch.zeros(1, device=self.device),
+            yaw.unsqueeze(0)
+        )[0]
+
+        # Store several slightly noisy copies so the buffer isn't a single point
+        for _ in range(20):
+            noise_pos = via_pos + torch.randn(3, device=self.device) * 0.3
+            noise_vel = approach_vel + torch.randn(3, device=self.device) * 0.5
+            noise_vel[2] = noise_vel[2].clamp(min=0.5)  # keep upward component
+
+            self._reset_buffer.store(
+                gate_id=loop_gate_id,
+                pos=noise_pos,
+                lin_vel=noise_vel,
+                quat=quat,
+                ang_vel=torch.zeros(3, device=self.device),
+                motor_speeds=torch.ones(4, device=self.device) * 500.0
+            )
+
 
     def _detect_gate_crossing(
         self,
@@ -325,75 +372,61 @@ class DefaultQuadcopterStrategy:
         self,
         gate_centers: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Reward velocity alignment with the gate normal when within approach radius.
-        This incentivizes approaching the gate face directly rather than at an angle,
-        preventing wide looping paths before gate entry.
-        """
         drone_pos = self.env._robot.data.root_link_pos_w
         vel_w = self.env._robot.data.root_com_lin_vel_w
 
-        # Distance to current gate center
         dist_to_gate = torch.norm(drone_pos - gate_centers, dim=1)
+        gate_normals = self.env._normal_vectors[self.env._idx_wp]
 
-        # Gate normal vectors (X axis of gate frame = approach direction)
-        gate_normals = self.env._normal_vectors[self.env._idx_wp]  # [num_envs, 3]
-
-        # Velocity magnitude
         vel_mag = torch.norm(vel_w, dim=1, keepdim=True).clamp(min=0.1)
         vel_unit = vel_w / vel_mag
 
-        # Dot product between velocity direction and gate normal
-        # +1.0 = flying perfectly into the gate face
-        # -1.0 = flying directly away from it
-        alignment = (vel_unit * gate_normals).sum(dim=1)  # [-1, 1]
+        alignment = (vel_unit * gate_normals).sum(dim=1)
 
-        # Only activate within approach radius, scale by distance (stronger closer to gate)
-        approach_radius = 3.0  # meters — tune based on track scale
+        # --- CHANGED: 2.0 m radius (was 3.0), no proximity weight ---
+        approach_radius = 2.0
         in_range = (dist_to_gate < approach_radius).float()
-
-        # Weight by how close the drone is: reward grows as drone gets closer to gate
-        proximity_weight = (1.0 - dist_to_gate / approach_radius).clamp(min=0.0)
-
-        # Only reward positive alignment (approaching), don't double-penalize flying away
-        approach_reward = alignment.clamp(min=0.0) * proximity_weight * in_range
+        approach_reward = alignment.clamp(min=0.0) * in_range
 
         return approach_reward
+
     def _calculate_progress_reward(
         self,
         crossed_gate_correct_direction: torch.Tensor,
         gate_centers: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Progress measured along the gate's approach axis (X in gate frame),
-        not Euclidean distance. This prevents the drone from finding looping
-        paths that reduce distance without actually approaching the gate face.
-        """
-        prev_x = self._prev_pose_drone_wrt_gate[:, 0].clone()  # X in gate frame last step
-        current_x = self.env._pose_drone_wrt_gate[:, 0]        # X in gate frame this step
+        prev_x = self._prev_pose_drone_wrt_gate[:, 0].clone()
+        current_x = self.env._pose_drone_wrt_gate[:, 0]
+
+        # --- NEW: compute 3D euclidean progress as fallback ---
+        drone_pos = self.env._robot.data.root_link_pos_w
+        curr_3d_dist = torch.norm(drone_pos - gate_centers, dim=1)
+        euclidean_progress = self._prev_distance_to_gate - curr_3d_dist
 
         successful_crossed = torch.where(crossed_gate_correct_direction)[0]
         not_successful_crossed = torch.where(~crossed_gate_correct_direction)[0]
 
         current_distance = torch.zeros(self.num_envs, device=self.device)
 
-        # For successful crossing: reward the final approach distance (X before crossing)
         if successful_crossed.numel() > 0:
             prev_x[successful_crossed] = self._prev_pose_drone_wrt_gate[successful_crossed, 0]
             current_distance[successful_crossed] = 0.0
 
-        # For non-crossing: use gate-frame X distance
-        # clamp to 0 so we don't reward negative X (drone has already passed through)
         if not_successful_crossed.numel() > 0:
             current_distance[not_successful_crossed] = current_x[not_successful_crossed].clamp(min=0.0)
 
-        # Progress = reduction in X distance to gate plane
-        # Only reward when drone is in front of gate (prev_x > 0)
-        # Clamp prev_x too so we don't give huge rewards when resetting behind a gate
+        # Original X-axis progress (precise, but penalises looping above/around)
         prev_x_clamped = prev_x.clamp(min=0.0)
-        progress = prev_x_clamped - current_distance
+        x_progress = prev_x_clamped - current_distance
+
+        # SWITCH: only use X-axis progress when drone is close AND in front of gate.
+        # When far away (> 3 m), fall back to 3D euclidean so upward/sideways arcs
+        # are NOT penalised — this is what allows the loop above gate 4 to be discovered.
+        use_x_progress = (curr_3d_dist < 3.0) & (current_x > 0.0)
+        progress = torch.where(use_x_progress, x_progress, euclidean_progress)
 
         return progress, current_distance
+
     def _calculate_next_gate_progress(
         self,
         crossed_gate_correct_direction: torch.Tensor,
