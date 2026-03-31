@@ -340,6 +340,7 @@ class DefaultQuadcopterStrategy:
             print(f"[DEBUG] {label} gate_frame_X = {p_in_frame[0,0]:.3f}  (must be > 0)")
         print(f"[INFO]  Gate {LOOP_GATE_ID} buffer seeded with {self._reset_buffer.get_count(LOOP_GATE_ID)} states")
 
+        self._last_crossing_speed = torch.zeros(self.num_envs, device=self.device)
 
     def _randomize_dynamics(self, env_ids: torch.Tensor):
         """Randomize dynamics parameters for specified environments.
@@ -432,27 +433,27 @@ class DefaultQuadcopterStrategy:
         return gate_passed, gate_missed, crossed_gate_backward
 
 
-    def _calculate_approach_angle_reward(
-        self,
-        gate_centers: torch.Tensor,
-    ) -> torch.Tensor:
-        drone_pos = self.env._robot.data.root_link_pos_w
-        vel_w = self.env._robot.data.root_com_lin_vel_w
+    # def _calculate_approach_angle_reward(
+    #     self,
+    #     gate_centers: torch.Tensor,
+    # ) -> torch.Tensor:
+    #     drone_pos = self.env._robot.data.root_link_pos_w
+    #     vel_w = self.env._robot.data.root_com_lin_vel_w
 
-        dist_to_gate = torch.norm(drone_pos - gate_centers, dim=1)
-        gate_normals = self.env._normal_vectors[self.env._idx_wp]
+    #     dist_to_gate = torch.norm(drone_pos - gate_centers, dim=1)
+    #     gate_normals = self.env._normal_vectors[self.env._idx_wp]
 
-        vel_mag = torch.norm(vel_w, dim=1, keepdim=True).clamp(min=0.1)
-        vel_unit = vel_w / vel_mag
+    #     vel_mag = torch.norm(vel_w, dim=1, keepdim=True).clamp(min=0.1)
+    #     vel_unit = vel_w / vel_mag
 
-        alignment = (vel_unit * gate_normals).sum(dim=1)
+    #     alignment = (vel_unit * gate_normals).sum(dim=1)
 
-        # --- CHANGED: 2.0 m radius (was 3.0), no proximity weight ---
-        approach_radius = 2.0
-        in_range = (dist_to_gate < approach_radius).float()
-        approach_reward = alignment.clamp(min=0.0) * in_range
+    #     # --- CHANGED: 2.0 m radius (was 3.0), no proximity weight ---
+    #     approach_radius = 2.0
+    #     in_range = (dist_to_gate < approach_radius).float()
+    #     approach_reward = alignment.clamp(min=0.0) * in_range
 
-        return approach_reward
+    #     return approach_reward
 
     def _calculate_progress_reward(
         self,
@@ -495,11 +496,7 @@ class DefaultQuadcopterStrategy:
         prev_x_clamped = prev_x.clamp(min=0.0)
         x_progress = prev_x_clamped - current_distance
 
-        # SWITCH: only use X-axis progress when drone is close AND in front of gate.
-        # When far away (> 3 m), fall back to 3D euclidean so upward/sideways arcs
-        # are NOT penalised — this is what allows the loop above gate 4 to be discovered.
-        use_x_progress = (curr_3d_dist < 3.0) & (gate_frame_x > 0.0) & (~needs_arc)
-        progress = torch.where(use_x_progress, x_progress, euclidean_progress)
+        progress = euclidean_progress
 
         return progress, current_distance, effective_centers  # <-- add this
 
@@ -580,6 +577,12 @@ class DefaultQuadcopterStrategy:
 
             self._prev_pose_drone_wrt_gate[ids_to_next_gate] = new_pose_drone_wrt_gate
             self.env._prev_x_drone_wrt_gate[ids_to_next_gate] = new_pose_drone_wrt_gate[:, 0]
+
+            crossing_speeds = torch.norm(
+                self.env._robot.data.root_com_lin_vel_w[ids_to_next_gate], dim=1
+            )
+            self._last_crossing_speed = torch.zeros(self.num_envs, device=self.device)
+            self._last_crossing_speed[ids_to_next_gate] = crossing_speeds
 
     def _update_tracking_variables(self, gate_passed, current_distance, gate_centers, effective_centers):
         ids_not_passed = torch.where(~gate_passed)[0]
@@ -756,7 +759,7 @@ class DefaultQuadcopterStrategy:
             blended_dir = blend_w / torch.norm(blend_w, dim=1, keepdim=True).clamp(min=0.1)
 
             dist_to_gate_scalar = gate_dist.squeeze(1)
-            dist_weight = (1.0 - (dist_to_gate_scalar - 3.0) / 4.0).clamp(min=0.2, max=1.3)
+            dist_weight = (1.0 + (3.0 - dist_to_gate_scalar) / 3.0).clamp(min=0.5, max=2.0)
 
 
             # AFTER — gate 4 requires an arc, straight-line velocity reward fights it
@@ -776,8 +779,10 @@ class DefaultQuadcopterStrategy:
             velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale'] * velocity_scale
 
 
-            approach_angle_reward = self._calculate_approach_angle_reward(gate_centers)
-            approach_angle_scaled = approach_angle_reward * self.env.rew.get('approach_angle_reward_scale', 3.0)
+
+            gate_crossing_speed_reward = self._last_crossing_speed * gate_passed.float()
+            gate_crossing_speed_scaled = gate_crossing_speed_reward * self.env.rew.get('gate_crossing_speed_scale', 5.0)
+
 
             speed = torch.norm(vel_w, dim=1)
             speed_reward = speed * 0.3  # tune between 0.1 and 0.5
