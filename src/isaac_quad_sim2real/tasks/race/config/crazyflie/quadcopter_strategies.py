@@ -458,13 +458,25 @@ class DefaultQuadcopterStrategy:
         crossed_gate_correct_direction: torch.Tensor,
         gate_centers: torch.Tensor,
     ) -> torch.Tensor:
+        LOOP_GATE_IDX = 4
+        via_point = torch.tensor([-3.8, -1.2, 3.5], device=self.device)
+
+        drone_pos = self.env._robot.data.root_link_pos_w
+        gate_frame_x = self.env._pose_drone_wrt_gate[:, 0]
+
+        targeting_loop = (self.env._idx_wp == LOOP_GATE_IDX)
+        needs_arc = targeting_loop & (gate_frame_x < 1.0)
+
+        # Effective gate center for distance computation
+        effective_centers = gate_centers.clone()
+        effective_centers[needs_arc] = via_point.unsqueeze(0).expand(needs_arc.sum(), -1)
+
+        curr_3d_dist = torch.norm(drone_pos - effective_centers, dim=1)
+        euclidean_progress = self._prev_distance_to_gate - curr_3d_dist
+
         prev_x = self._prev_pose_drone_wrt_gate[:, 0].clone()
         current_x = self.env._pose_drone_wrt_gate[:, 0]
 
-        # --- NEW: compute 3D euclidean progress as fallback ---
-        drone_pos = self.env._robot.data.root_link_pos_w
-        curr_3d_dist = torch.norm(drone_pos - gate_centers, dim=1)
-        euclidean_progress = self._prev_distance_to_gate - curr_3d_dist
 
         successful_crossed = torch.where(crossed_gate_correct_direction)[0]
         not_successful_crossed = torch.where(~crossed_gate_correct_direction)[0]
@@ -485,10 +497,10 @@ class DefaultQuadcopterStrategy:
         # SWITCH: only use X-axis progress when drone is close AND in front of gate.
         # When far away (> 3 m), fall back to 3D euclidean so upward/sideways arcs
         # are NOT penalised — this is what allows the loop above gate 4 to be discovered.
-        use_x_progress = (curr_3d_dist < 3.0) & (current_x > 0.0)
+        use_x_progress = (curr_3d_dist < 3.0) & (gate_frame_x > 0.0) & (~needs_arc)
         progress = torch.where(use_x_progress, x_progress, euclidean_progress)
 
-        return progress, current_distance
+        return progress, current_distance, effective_centers  # <-- add this
 
     def _calculate_next_gate_progress(
         self,
@@ -568,12 +580,7 @@ class DefaultQuadcopterStrategy:
             self._prev_pose_drone_wrt_gate[ids_to_next_gate] = new_pose_drone_wrt_gate
             self.env._prev_x_drone_wrt_gate[ids_to_next_gate] = new_pose_drone_wrt_gate[:, 0]
 
-    def _update_tracking_variables(
-        self,
-        gate_passed: torch.Tensor,
-        current_distance: torch.Tensor,
-        gate_centers: torch.Tensor,   # ADD THIS ARGUMENT
-    ) -> None:
+    def _update_tracking_variables(self, gate_passed, current_distance, gate_centers, effective_centers):
         ids_not_passed = torch.where(~gate_passed)[0]
         if ids_not_passed.numel() > 0:
             self._prev_pose_drone_wrt_gate[ids_not_passed] = (
@@ -582,12 +589,11 @@ class DefaultQuadcopterStrategy:
             self.env._prev_x_drone_wrt_gate[ids_not_passed] = (
                 self.env._pose_drone_wrt_gate[ids_not_passed, 0]
             )
-            # FIXED: store actual 3D euclidean distance, not gate-frame X
             drone_pos = self.env._robot.data.root_link_pos_w[ids_not_passed]
+            # Use effective_centers so prev/curr distances are always measured to the same target
             self._prev_distance_to_gate[ids_not_passed] = torch.norm(
-                drone_pos - gate_centers[ids_not_passed], dim=1
+                drone_pos - effective_centers[ids_not_passed], dim=1
             )
-
 
     def get_rewards(self) -> torch.Tensor:
         """
@@ -628,7 +634,7 @@ class DefaultQuadcopterStrategy:
         crossed_gate_correct_direction = gate_passed | gate_missed
         
         # 1. Dense progress reward
-        progress_current, current_distance = self._calculate_progress_reward(crossed_gate_correct_direction, gate_centers)
+        progress_current, current_distance, effective_centers = self._calculate_progress_reward(crossed_gate_correct_direction, gate_centers)
         # only calc reward for flying towards next gate for success gates
         progress_next_gate = self._calculate_next_gate_progress(gate_passed, gate_centers, next_gate_indices)
 
@@ -643,7 +649,7 @@ class DefaultQuadcopterStrategy:
         gate_reward = gate_passed.float() * 1.0 + gate_missed.float() * (-1.0)
         
         #  update tracking for next timestep
-        self._update_tracking_variables(gate_passed, current_distance, gate_centers)
+        self._update_tracking_variables(gate_passed, current_distance, gate_centers, effective_centers)
 
         # Compute pose wrt prev gate
         prev_gate_indices = (self.env._idx_wp - 1) % num_gates
@@ -690,7 +696,23 @@ class DefaultQuadcopterStrategy:
             # Replace your current velocity reward block with this
             next_gate_centers = self.env._waypoints[next_gate_indices, :3]
 
-            gate_dir = gate_centers - self.env._robot.data.root_link_pos_w
+            LOOP_GATE_IDX = 4
+            # World-frame via-point: high and NW of gate 4, on the correct approach side
+            # gate_4_center + ~3.5m * gate_4_normal + altitude
+            via_point = torch.tensor([-3.8, -1.2, 3.5], device=self.device)
+
+            # Determine if drone needs to arc (targeting gate 4 AND on wrong/exit side)
+            targeting_loop = (self.env._idx_wp == LOOP_GATE_IDX)
+            gate_frame_x = self.env._pose_drone_wrt_gate[:, 0]
+            on_wrong_side = gate_frame_x < 1.0  # not yet on approach side
+            needs_arc = targeting_loop & on_wrong_side
+
+            # Effective target: via-point for arcing envs, gate center otherwise
+            effective_target = gate_centers.clone()
+            effective_target[needs_arc] = via_point.unsqueeze(0).expand(needs_arc.sum(), -1)
+
+            # Recompute velocity reward using effective target instead of raw gate center
+            gate_dir = effective_target - self.env._robot.data.root_link_pos_w
             next_gate_dir = next_gate_centers - self.env._robot.data.root_link_pos_w
 
             gate_dist = torch.norm(gate_dir, dim=1, keepdim=True).clamp(min=0.1)
@@ -699,13 +721,13 @@ class DefaultQuadcopterStrategy:
             gate_dir_unit = gate_dir / gate_dist
             next_gate_dir_unit = next_gate_dir / next_gate_dist
 
-            # 80% toward current gate, 20% toward next — tightens corner anticipation
-            blended_dir = 0.8 * gate_dir_unit + 0.2 * next_gate_dir_unit
-            blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
+            # For arc envs: 100% toward via-point; for others: 80/20 blend as before
+            blend_w = torch.where(needs_arc.unsqueeze(1), 
+                                torch.ones_like(gate_dir_unit),
+                                0.8 * gate_dir_unit + 0.2 * next_gate_dir_unit)
+            blended_dir = blend_w / torch.norm(blend_w, dim=1, keepdim=True).clamp(min=0.1)
 
-            # AFTER — scale down velocity reward when far from gate, give policy room to arc
-            dist_to_gate_scalar = torch.norm(gate_dir, dim=1)   # already computed above
-            # Full reward only within 3m, fades to 20% at 7m+ so arcing is not penalised
+            dist_to_gate_scalar = gate_dist.squeeze(1)
             dist_weight = (1.0 - (dist_to_gate_scalar - 3.0) / 4.0).clamp(min=0.2, max=1.0)
 
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
