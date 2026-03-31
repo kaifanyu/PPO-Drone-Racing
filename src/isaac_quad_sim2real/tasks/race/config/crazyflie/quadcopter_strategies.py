@@ -235,18 +235,43 @@ class DefaultQuadcopterStrategy:
             device=self.device,
             noise_std=noise_std
         )
-
-        # ↓ ADD RIGHT HERE, after _reset_buffer is constructed ↓
+        # BEFORE — wrong side of gate 4
         LOOP_GATE_ID = 3
+        via_pos = torch.tensor([0.8, -1.5, 3.2], dtype=torch.float32, device=self.device)
+        approach_vel = torch.tensor([-3.0, -4.0, -0.5], dtype=torch.float32, device=self.device)
+        self._seed_loop_buffer(LOOP_GATE_ID, via_pos, approach_vel)
+        # Sanity check: gate_frame_X of via_pos should be POSITIVE
+        gate_4_center = self.env._waypoints[4, :3]
+        gate_4_normal = self.env._normal_vectors[4]
+        relative = via_pos - gate_4_center
+        gate_frame_x = (relative * gate_4_normal).sum()
+        print(f"[DEBUG] Via-point gate_frame_X = {gate_frame_x:.3f}  (must be > 0 for correct approach side)")
+        # Should print: [DEBUG] Via-point gate_frame_X = 2.83  (correct)
+        
+        # AFTER — correct approach side, south-east of gate 4, heading north-west through it
+        LOOP_GATE_ID = 4   # ← seed gate 4's buffer, not gate 3's
         via_pos = torch.tensor(
-            [0.8, -1.5, 3.2],
+            [1.3, -6.3, 2.3],   # south-east of gate 4, gate_frame_X ≈ +2.8 (correct approach side)
             dtype=torch.float32, device=self.device
         )
         approach_vel = torch.tensor(
-            [-3.0, -4.0, -0.5],
+            [-3.5, 3.5, 0.3],   # heading north-west = gate normal direction (-0.707, +0.707)
             dtype=torch.float32, device=self.device
         )
         self._seed_loop_buffer(LOOP_GATE_ID, via_pos, approach_vel)
+
+        # Also seed the mid-arc state: drone has just exited gate 3, heading south and climbing
+        MID_ARC_GATE_ID = 4
+        mid_arc_pos = torch.tensor(
+            [0.5, -3.0, 1.8],   # midway, still on approach side, gate_frame_X ≈ +1.5
+            dtype=torch.float32, device=self.device
+        )
+        mid_arc_vel = torch.tensor(
+            [-1.5, -3.0, 1.0],  # going south and climbing — the upward arc phase
+            dtype=torch.float32, device=self.device
+        )
+        self._seed_loop_buffer(MID_ARC_GATE_ID, mid_arc_pos, mid_arc_vel)
+
         print(f"[INFO] Gate {LOOP_GATE_ID} buffer seeded with {self._reset_buffer.get_count(LOOP_GATE_ID)} states")
 
 
@@ -640,8 +665,14 @@ class DefaultQuadcopterStrategy:
             blended_dir = 0.8 * gate_dir_unit + 0.2 * next_gate_dir_unit
             blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
 
+            # AFTER — scale down velocity reward when far from gate, give policy room to arc
+            dist_to_gate_scalar = torch.norm(gate_dir, dim=1)   # already computed above
+            # Full reward only within 3m, fades to 20% at 7m+ so arcing is not penalised
+            dist_weight = (1.0 - (dist_to_gate_scalar - 3.0) / 4.0).clamp(min=0.2, max=1.0)
+
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
-            velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
+            velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale'] * dist_weight
+
 
             approach_angle_reward = self._calculate_approach_angle_reward(gate_centers)
             approach_angle_scaled = approach_angle_reward * self.env.rew.get('approach_angle_reward_scale', 3.0)
