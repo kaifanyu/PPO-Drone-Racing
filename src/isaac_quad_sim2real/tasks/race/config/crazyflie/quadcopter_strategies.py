@@ -311,7 +311,7 @@ class DefaultQuadcopterStrategy:
         for _ in range(20):
             noise_pos = via_pos + torch.randn(3, device=self.device) * 0.3
             noise_vel = approach_vel + torch.randn(3, device=self.device) * 0.5
-            noise_vel[2] = noise_vel[2].clamp(min=0.5)  # keep upward component
+            noise_vel[2] = noise_vel[2].clamp(max=1.0)   # cap upward, don't force it
 
             self._reset_buffer.store(
                 gate_id=loop_gate_id,
@@ -319,7 +319,7 @@ class DefaultQuadcopterStrategy:
                 lin_vel=noise_vel,
                 quat=quat,
                 ang_vel=torch.zeros(3, device=self.device),
-                motor_speeds=torch.ones(4, device=self.device) * 500.0
+                motor_speeds=torch.ones(4, device=self.device)
             )
 
 
@@ -505,19 +505,25 @@ class DefaultQuadcopterStrategy:
             self._prev_pose_drone_wrt_gate[ids_to_next_gate] = new_pose_drone_wrt_gate
             self.env._prev_x_drone_wrt_gate[ids_to_next_gate] = new_pose_drone_wrt_gate[:, 0]
 
-
     def _update_tracking_variables(
         self,
         gate_passed: torch.Tensor,
         current_distance: torch.Tensor,
+        gate_centers: torch.Tensor,   # ADD THIS ARGUMENT
     ) -> None:
-        """Update previous pose and distance for next timestep."""
-        # Update envs that did not successfully pass the gate
         ids_not_passed = torch.where(~gate_passed)[0]
         if ids_not_passed.numel() > 0:
-            self._prev_pose_drone_wrt_gate[ids_not_passed] = (self.env._pose_drone_wrt_gate[ids_not_passed].clone())
-            self.env._prev_x_drone_wrt_gate[ids_not_passed] = (self.env._pose_drone_wrt_gate[ids_not_passed, 0])
-            self._prev_distance_to_gate[ids_not_passed] = current_distance[ids_not_passed].clone()
+            self._prev_pose_drone_wrt_gate[ids_not_passed] = (
+                self.env._pose_drone_wrt_gate[ids_not_passed].clone()
+            )
+            self.env._prev_x_drone_wrt_gate[ids_not_passed] = (
+                self.env._pose_drone_wrt_gate[ids_not_passed, 0]
+            )
+            # FIXED: store actual 3D euclidean distance, not gate-frame X
+            drone_pos = self.env._robot.data.root_link_pos_w[ids_not_passed]
+            self._prev_distance_to_gate[ids_not_passed] = torch.norm(
+                drone_pos - gate_centers[ids_not_passed], dim=1
+            )
 
 
     def get_rewards(self) -> torch.Tensor:
@@ -574,7 +580,7 @@ class DefaultQuadcopterStrategy:
         gate_reward = gate_passed.float() * 1.0 + gate_missed.float() * (-1.0)
         
         #  update tracking for next timestep
-        self._update_tracking_variables(gate_passed, current_distance)
+        self._update_tracking_variables(gate_passed, current_distance, gate_centers)
 
         # Compute pose wrt prev gate
         prev_gate_indices = (self.env._idx_wp - 1) % num_gates
