@@ -176,7 +176,7 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["backward_crossing",  "approach_angle"]  # adds extra backwards_crossing key 
+            extra_keys = ["backward_crossing", "gate_crossing_speed", "speed"]
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -785,7 +785,7 @@ class DefaultQuadcopterStrategy:
 
 
             speed = torch.norm(vel_w, dim=1)
-            speed_reward = speed * 0.3  # tune between 0.1 and 0.5
+            speed_reward = speed * self.env.rew.get('speed_reward_scale', 0.3)
 
             # Aggregate all components
             rewards = {
@@ -795,8 +795,8 @@ class DefaultQuadcopterStrategy:
                 "roll_pitch_rates": roll_pitch_rates_penalty,
                 "yaw_rate": yaw_rate_penalty,
                 "backward_crossing": backward_penalty,
-                "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
-                "approach_angle": approach_angle_scaled,   # ADD THIS
+                "velocity_toward_gate": velocity_reward,
+                "gate_crossing_speed": gate_crossing_speed_scaled,  # ADD THIS
                 "speed": speed_reward,
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
