@@ -219,9 +219,54 @@ class DefaultQuadcopterStrategy:
         self._prev_pose_drone_wrt_prev_gate = torch.zeros(self.num_envs, 3, device=self.device)
 
 
+        # ------------------------------------------------------------------ #
+        # INSERT VIRTUAL WAYPOINT at index 3 (between old gate 3 and gate 4) #
+        # ------------------------------------------------------------------ #
+        self._virtual_gate_index = 3
+        self._virtual_gate_half  = 0.6   # small gate — just big enough to pass through
+        
+        # Position: north of and above the two touching gates
+        # Gate 4 (old idx 3) is at [0.625, 0.0, 0.75] — place virtual gate
+        # 1.8m north and 1.8m above so the center is reachable mid-arc
+        virtual_wp = torch.tensor(
+            [[0.625, 1.8, 2.2,  0.0, 0.0, 1.5708]],  # yaw=π/2 → normal = +Y (north-facing)
+            device=self.device
+        )
+
+        # Quaternion for yaw=π/2: [cos(π/4), 0, 0, sin(π/4)]
+        virtual_quat = quat_from_euler_xyz(
+            torch.zeros(1, device=self.device),
+            torch.zeros(1, device=self.device),
+            torch.tensor([np.pi / 2], device=self.device)
+        )  # shape [1, 4]
+
+        # Normal vector for yaw=π/2 is +Y
+        virtual_normal = torch.tensor([[0.0, 1.0, 0.0]], device=self.device)
+
+        # Patch all waypoint arrays by inserting at index 3
+        env._waypoints = torch.cat([
+            env._waypoints[:3],
+            virtual_wp,
+            env._waypoints[3:]
+        ], dim=0)
+
+        env._waypoints_quat = torch.cat([
+            env._waypoints_quat[:3],
+            virtual_quat,
+            env._waypoints_quat[3:]
+        ], dim=0)
+
+        env._normal_vectors = torch.cat([
+            env._normal_vectors[:3],
+            virtual_normal,
+            env._normal_vectors[3:]
+        ], dim=0)
+
         # Initialize reset buffer for curriculum learning
         # Stores 17-dim states: [pos(3), lin_vel(3), quat(4), ang_vel(3), motor_speeds(4)]
         num_gates = len(env._waypoints) if hasattr(env, '_waypoints') else 6
+
+
         noise_std = {
             'pos': 0.3,           # Position noise (m)
             'lin_vel': 0.3,       # Linear velocity noise (m/s)
@@ -235,8 +280,32 @@ class DefaultQuadcopterStrategy:
             device=self.device,
             noise_std=noise_std
         )
+        # Seed the VIRTUAL gate (index 3), not the loop gate
+        VIRTUAL_GATE_ID = 3
 
-        LOOP_GATE_ID = 3  # gate 4 counting from 1, at [0.625, 0.0, 0.75]
+        # These states represent the drone mid-arc: 
+        # elevated, north of gate stack, heading south
+        up_pos = torch.tensor(
+            [0.625, 2.8, 2.4],           # north of virtual gate, approaching from behind
+            dtype=torch.float32, device=self.device
+        )
+        up_vel = torch.tensor(
+            [0.0, -3.5, -0.3],           # heading south toward virtual gate
+            dtype=torch.float32, device=self.device
+        )
+        self._seed_loop_buffer(VIRTUAL_GATE_ID, up_pos, up_vel)
+
+        via_pos = torch.tensor(
+            [0.625, 3.5, 2.8],           # further north, higher up — earlier in arc
+            dtype=torch.float32, device=self.device
+        )
+        approach_vel = torch.tensor(
+            [0.0, -2.0, -1.0],           # heading south and descending
+            dtype=torch.float32, device=self.device
+        )
+        self._seed_loop_buffer(VIRTUAL_GATE_ID, via_pos, approach_vel)
+
+        LOOP_GATE_ID = 4  # gate 4 counting from 1, at [0.625, 0.0, 0.75]
 
         # Phase 1: drone has swung north, elevated, beginning descent toward gate 4
         up_pos = torch.tensor(
@@ -261,11 +330,11 @@ class DefaultQuadcopterStrategy:
         self._seed_loop_buffer(LOOP_GATE_ID, via_pos, approach_vel)
 
         # Fix the debug check too
-        gate_3_pos  = self.env._waypoints[LOOP_GATE_ID, :3]
-        gate_3_quat = self.env._waypoints_quat[LOOP_GATE_ID, :]
+        gate_4_pos  = self.env._waypoints[LOOP_GATE_ID, :3]   # reads index 4 = real loop gate
+        gate_4_quat = self.env._waypoints_quat[LOOP_GATE_ID, :]
         for label, p in [("Up-phase ", up_pos), ("Via-point", via_pos)]:
             p_in_frame, _ = subtract_frame_transforms(
-                gate_3_pos.unsqueeze(0), gate_3_quat.unsqueeze(0), p.unsqueeze(0)
+                gate_4_pos.unsqueeze(0), gate_4_quat.unsqueeze(0), p.unsqueeze(0)
             )
             print(f"[DEBUG] {label} gate_frame_X = {p_in_frame[0,0]:.3f}  (must be > 0)")
         print(f"[INFO]  Gate {LOOP_GATE_ID} buffer seeded with {self._reset_buffer.get_count(LOOP_GATE_ID)} states")
@@ -343,52 +412,25 @@ class DefaultQuadcopterStrategy:
                 motor_speeds=torch.ones(4, device=self.device)
             )
 
+    def _detect_gate_crossing(self, current_gate_position, prev_gate_position,
+                            expanded_half, gate_half):
+        # expanded_half and gate_half are now [num_envs] tensors, not scalars
+        prev_x   = prev_gate_position[:, 0]
+        curr_x   = current_gate_position[:, 0]
+        curr_y   = current_gate_position[:, 1]
+        curr_z   = current_gate_position[:, 2]
 
-    def _detect_gate_crossing(
-        self,
-        current_gate_position: torch.Tensor,
-        prev_gate_position: torch.Tensor,
-        expanded_half: float,
-        gate_half: float,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Gate local frame: 
-        X: normal axis (approach / exit direction)
-        Y: horizontal axis (left / right)
-        Z: vertical axis (up / down)
-        
-        To detect a gate crossing, we need it to 
-        1. Go through the correct X direction
-        2. Make drone pass thorugh the center, ideally middle of Y and middle of Z
-        """
+        crossed_forward  = (prev_x > 0.0) & (curr_x <= 0.0)
+        inside_gate      = (curr_y.abs() <= gate_half)     & (curr_z.abs() <= gate_half)
+        inside_expanded  = (curr_y.abs() <= expanded_half) & (curr_z.abs() <= expanded_half)
 
-        # drone's position expressed in gate's local frame at 2 timesteps
-        prev_drone_position = prev_gate_position[:, 0]
-        current_drone_position_X = current_gate_position[:, 0]
-        current_drone_position_Y = current_gate_position[:, 1]
-        current_drone_position_Z = current_gate_position[:, 2]
-
-        # cross the gate going forward (+x -> x <= 0)
-        crossed_gate_correct_direction = (prev_drone_position > 0.0) & (current_drone_position_X <= 0.0)
-        
-        # check if drone fit through gate
-        crossed_inside_gate = (
-            (torch.abs(current_drone_position_Y) <= gate_half) &
-            (torch.abs(current_drone_position_Z) <= gate_half)
-        )
-        
-        # 3) Allow an expanded detection window for misses, if provided
-        crossed_inside_expanded_gate = (
-            (torch.abs(current_drone_position_Y) <= expanded_half) &
-            (torch.abs(current_drone_position_Z) <= expanded_half)
-        )
-
-        # 3 possible ways for gate crossing: passed correctly, missed gate, passed backwards
-        gate_passed = crossed_gate_correct_direction & crossed_inside_gate
-        gate_missed = crossed_gate_correct_direction & crossed_inside_expanded_gate & (~crossed_inside_gate)
-        crossed_gate_backward = ((prev_drone_position < 0.0) & (current_drone_position_X >= 0.0) & crossed_inside_expanded_gate)
+        gate_passed           = crossed_forward & inside_gate
+        gate_missed           = crossed_forward & inside_expanded & (~inside_gate)
+        crossed_gate_backward = (prev_x < 0.0) & (curr_x >= 0.0) & inside_expanded
 
         return gate_passed, gate_missed, crossed_gate_backward
+
+
     def _calculate_approach_angle_reward(
         self,
         gate_centers: torch.Tensor,
@@ -564,11 +606,28 @@ class DefaultQuadcopterStrategy:
         """
 
         # Gate setup
-        pose_gate = self.env._pose_drone_wrt_gate  # [x,y,z] in gate frame
-        gate_half = getattr(self.env._gate_model_cfg_data, "gate_side", 1.0) * 0.5 \
+
+        # Per-gate half size: use small value for virtual gate
+        gate_half_default = getattr(self.env._gate_model_cfg_data, "gate_side", 1.0) * 0.5 \
             if hasattr(self.env, "_gate_model_cfg_data") else 0.5
+
+        is_virtual = (self.env._idx_wp == self._virtual_gate_index)
+        gate_half_per_env = torch.where(
+            is_virtual,
+            torch.full((self.num_envs,), self._virtual_gate_half, device=self.device),
+            torch.full((self.num_envs,), gate_half_default, device=self.device)
+        )
+
         expand = getattr(self.cfg, "gate_detection_expand", 1.4)
-        expanded_half = gate_half * expand 
+        expanded_half_per_env = gate_half_per_env * expand
+
+        # Pass scalars into _detect_gate_crossing per-env by calling it per-group,
+        # OR simplify: use the default for detection and just log separately.
+        # Easiest approach — use the mean (virtual gate is rare, safe approximation):
+        gate_half     = gate_half_per_env     # keep as tensor
+        expanded_half = expanded_half_per_env
+        pose_gate = self.env._pose_drone_wrt_gate  # [x,y,z] in gate frame
+
 
         gate_centers = self.env._waypoints[self.env._idx_wp, :3]
         self.env._desired_pos_w[:] = gate_centers   # desired pos = gate centers
@@ -610,19 +669,29 @@ class DefaultQuadcopterStrategy:
         self._update_tracking_variables(gate_passed, current_distance, gate_centers, effective_centers)
 
         # Compute pose wrt prev gate
-        prev_gate_indices = (self.env._idx_wp - 1) % num_gates
+        prev_gate_indices = (self.env._idx_wp - 1) % num_gates            # ← define first
+
         prev_gate_pos  = self.env._waypoints[prev_gate_indices, :3]
         prev_gate_quat = self.env._waypoints_quat[prev_gate_indices, :]
-        current_pose_prev_gate, _ = subtract_frame_transforms(prev_gate_pos, prev_gate_quat, self.env._robot.data.root_link_pos_w)
+        current_pose_prev_gate, _ = subtract_frame_transforms(
+            prev_gate_pos, prev_gate_quat, self.env._robot.data.root_link_pos_w
+        )
 
-        # compute for wrong direction
+        is_prev_virtual = (prev_gate_indices == self._virtual_gate_index)
+        prev_gate_half_per_env = torch.where(
+            is_prev_virtual,
+            torch.full((self.num_envs,), self._virtual_gate_half, device=self.device),
+            torch.full((self.num_envs,), gate_half_default, device=self.device)
+        )
+        prev_expanded_half = prev_gate_half_per_env * expand
+
         prev_gate_crossed_backward = (
             (self._prev_pose_drone_wrt_prev_gate[:, 0] < 0.0) &
             (current_pose_prev_gate[:, 0] >= 0.0) &
-            (torch.abs(current_pose_prev_gate[:, 1]) <= expanded_half) &
-            (torch.abs(current_pose_prev_gate[:, 2]) <= expanded_half)
+            (torch.abs(current_pose_prev_gate[:, 1]) <= prev_expanded_half) &
+            (torch.abs(current_pose_prev_gate[:, 2]) <= prev_expanded_half)
         )
-
+        self._prev_pose_drone_wrt_prev_gate = current_pose_prev_gate.clone()
         # store for next timestep
         self._prev_pose_drone_wrt_prev_gate = current_pose_prev_gate.clone()
         
@@ -832,9 +901,19 @@ class DefaultQuadcopterStrategy:
             model_prim_names_in_env = [f"{self.env.target_models_prim_base_name}_{i}" for i in range(num_models_per_env)]
 
             self.env._all_target_models_paths = []
-            for env_path in self.env.scene.env_prim_paths:
-                paths_for_this_env = [f"{env_path}/{name}" for name in model_prim_names_in_env]
-                self.env._all_target_models_paths.append(paths_for_this_env)
+
+            if not self.env._models_paths_initialized:
+                num_models_per_env = self.env._waypoints.size(0)
+                model_prim_names_in_env = [
+                    f"{self.env.target_models_prim_base_name}_{i}"
+                    for i in range(num_models_per_env)
+                ]
+                self.env._all_target_models_paths = []
+                for env_path in self.env.scene.env_prim_paths:
+                    paths_for_this_env = [f"{env_path}/{name}" for name in model_prim_names_in_env]
+                    self.env._all_target_models_paths.append(paths_for_this_env)
+
+                self.env._models_paths_initialized = True
 
             self.env._models_paths_initialized = True
 
