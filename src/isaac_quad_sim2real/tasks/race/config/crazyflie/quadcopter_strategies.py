@@ -238,79 +238,42 @@ class DefaultQuadcopterStrategy:
 
         LOOP_GATE_ID = 4
 
-        # State 1: drone is 3m in front of gate 4, flying SE into it
+        # State 1: drone just exited gate 3, going DIRECTLY UP with minimal Y drift
+        # pos: just past gate 3 exit, elevated
+        # vel: strong Z up, minimal Y — this is the "directly up" phase
+        up_pos = torch.tensor(
+            [-2.5, -1.8, 2.8],   # gate_frame_X ≈ 2.4, safely on approach side
+            dtype=torch.float32, device=self.device
+        )
+        up_vel = torch.tensor(
+            [2.0, -2.0, 0.5],    # heading SE toward gate 4, slight descent
+            dtype=torch.float32, device=self.device
+        )
+        self._seed_loop_buffer(LOOP_GATE_ID, up_pos, up_vel)
+
+        # State 2: crested the arc, now heading NW toward gate 4 approach side
+        # pos: above and NW of gate 4, on the correct approach side
+        # vel: heading SE toward gate 4 center
         via_pos = torch.tensor(
-            [-3.6, -1.4, 2.5],
+            [-3.6, -1.4, 2.5],   # NW of gate 4, gate_frame_X ≈ +3.0
             dtype=torch.float32, device=self.device
         )
         approach_vel = torch.tensor(
-            [3.4, -3.4, -0.3],   # SE direction = toward gate 4 from approach side
+            [3.4, -3.4, -0.3],   # SE toward gate 4
             dtype=torch.float32, device=self.device
         )
         self._seed_loop_buffer(LOOP_GATE_ID, via_pos, approach_vel)
 
-        # State 2: mid-arc — drone exited gate 3 heading south, now climbing NW
-        mid_arc_pos = torch.tensor(
-            [-0.5, -1.8, 1.6],
-            dtype=torch.float32, device=self.device
-        )
-        mid_arc_vel = torch.tensor(
-            [-2.5, -1.5, 1.5],   # climbing and heading toward via_pos
-            dtype=torch.float32, device=self.device
-        )
-        self._seed_loop_buffer(LOOP_GATE_ID, mid_arc_pos, mid_arc_vel)
-
-        # ── Debug: verify via_pos is on correct approach side ─────────────────
+        # Debug check
         gate_4_pos  = self.env._waypoints[4, :3]
         gate_4_quat = self.env._waypoints_quat[4, :]
-        via_in_gate_frame, _ = subtract_frame_transforms(
-            gate_4_pos.unsqueeze(0),
-            gate_4_quat.unsqueeze(0),
-            via_pos.unsqueeze(0)
-        )
-        mid_in_gate_frame, _ = subtract_frame_transforms(
-            gate_4_pos.unsqueeze(0),
-            gate_4_quat.unsqueeze(0),
-            mid_arc_pos.unsqueeze(0)
-        )
-        print(f"[DEBUG] Gate 4 local X axis (world) : {self.env._normal_vectors[4]}")
-        print(f"[DEBUG] Via-point  gate_frame_X = {via_in_gate_frame[0,0]:.3f}  (must be > 0)")
-        print(f"[DEBUG] Mid-arc    gate_frame_X = {mid_in_gate_frame[0,0]:.3f}  (must be > 0)")
+        for label, p in [("Up-phase ", up_pos), ("Via-point", via_pos)]:
+            p_in_frame, _ = subtract_frame_transforms(
+                gate_4_pos.unsqueeze(0), gate_4_quat.unsqueeze(0), p.unsqueeze(0)
+            )
+            print(f"[DEBUG] {label} gate_frame_X = {p_in_frame[0,0]:.3f}  (must be > 0)")
         print(f"[INFO]  Gate {LOOP_GATE_ID} buffer seeded with {self._reset_buffer.get_count(LOOP_GATE_ID)} states")
-        # Should print: [DEBUG] Via-point gate_frame_X = 2.83  (correct)
-
-        # AFTER — correct approach side, south-east of gate 4, heading north-west through it
-
-        # AFTER — north-west of gate 4, which is the APPROACH side
-        # gate_center + 3m * gate_X_axis + 0.5m elevation
-        # = (-1.5, -3.5, 2.0) + 3*(-0.707, 0.707, 0) + (0, 0, 0.5)
-        # = (-3.6, -1.4, 2.5)
-        LOOP_GATE_ID = 4
-        via_pos = torch.tensor(
-            [-3.6, -1.4, 2.5],   # NW of gate 4, gate_frame_X ≈ +3.0 (correct approach side)
-            dtype=torch.float32, device=self.device
-        )
-        # Approach velocity: from via_pos toward gate center, flying SE (+x, -y)
-        # direction = gate_center - via_pos = (-1.5+3.6, -3.5+1.4) = (2.1, -2.1), speed ~5 m/s
-        approach_vel = torch.tensor(
-            [3.4, -3.4, -0.5],   # SE direction, slightly descending into gate 4
-            dtype=torch.float32, device=self.device
-        )
-
-        # Mid-arc state: drone has exited gate 3 and is climbing westward toward via-point
-        self._seed_loop_buffer(LOOP_GATE_ID, via_pos, approach_vel)
-
-        mid_arc_pos = torch.tensor(
-            [-1.5, -1.0, 1.8],   # midway, still NW approach side, climbing
-            dtype=torch.float32, device=self.device
-        )
-        mid_arc_vel = torch.tensor(
-            [-2.0, -1.5, 1.2],   # heading SW and climbing
-            dtype=torch.float32, device=self.device
-        )
-        self._seed_loop_buffer(LOOP_GATE_ID, mid_arc_pos, mid_arc_vel)
-
-        print(f"[INFO] Gate {LOOP_GATE_ID} buffer seeded with {self._reset_buffer.get_count(LOOP_GATE_ID)} states")
+        
 
 
     def _randomize_dynamics(self, env_ids: torch.Tensor):
@@ -730,8 +693,22 @@ class DefaultQuadcopterStrategy:
             dist_to_gate_scalar = gate_dist.squeeze(1)
             dist_weight = (1.0 - (dist_to_gate_scalar - 3.0) / 4.0).clamp(min=0.2, max=1.0)
 
+
+            # AFTER — gate 4 requires an arc, straight-line velocity reward fights it
+            # When gate 4 is the target AND drone is far from it, suppress velocity reward entirely
+            gate_4_idx = 4
+            is_gate_4 = (self.env._idx_wp == gate_4_idx)
+            far_from_gate = (dist_to_gate_scalar > 3.0)
+
+            # For gate 4 when far away: drop velocity reward to 0 so the arc isn't punished
+            # For all other gates and close range: use normal velocity reward
+            velocity_scale = torch.where(
+                is_gate_4 & far_from_gate,
+                torch.zeros_like(dist_weight),   # fully suppress for gate 4 arc phase
+                dist_weight                       # normal distance-weighted scale otherwise
+            )
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
-            velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale'] * dist_weight
+            velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale'] * velocity_scale
 
 
             approach_angle_reward = self._calculate_approach_angle_reward(gate_centers)
