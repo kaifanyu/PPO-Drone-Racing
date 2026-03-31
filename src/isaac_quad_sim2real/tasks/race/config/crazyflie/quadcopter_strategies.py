@@ -228,17 +228,18 @@ class DefaultQuadcopterStrategy:
         # Position: north of and above the two touching gates
         # Gate 4 (old idx 3) is at [0.625, 0.0, 0.75] — place virtual gate
         # 1.8m north and 1.8m above so the center is reachable mid-arc
+
+        # NEW — directly above gate 4, south-facing so drone passes through going south
         virtual_wp = torch.tensor(
-            [[0.625, 1.8, 2.2,  0.0, 0.0, 1.5708]],  # yaw=π/2 → normal = +Y (north-facing)
+            [[0.625, 0.0, 2.5,  0.0, 0.0, -1.5708]],  # same X,Y as gate 4, just higher Z
             device=self.device
         )
-
-        # Quaternion for yaw=π/2: [cos(π/4), 0, 0, sin(π/4)]
         virtual_quat = quat_from_euler_xyz(
             torch.zeros(1, device=self.device),
             torch.zeros(1, device=self.device),
-            torch.tensor([np.pi / 2], device=self.device)
-        )  # shape [1, 4]
+            torch.tensor([-np.pi / 2], device=self.device)   # yaw = -π/2 → normal = -Y (south)
+        )
+        virtual_normal = torch.tensor([[0.0, -1.0, 0.0]], device=self.device)  # -Y = south
 
         # Normal vector for yaw=π/2 is +Y
         virtual_normal = torch.tensor([[0.0, 1.0, 0.0]], device=self.device)
@@ -308,25 +309,25 @@ class DefaultQuadcopterStrategy:
         LOOP_GATE_ID = 4  # gate 4 counting from 1, at [0.625, 0.0, 0.75]
 
         # Phase 1: drone has swung north, elevated, beginning descent toward gate 4
+        # Drone is north of virtual gate, heading south and slightly down
         up_pos = torch.tensor(
-            [0.4, 2.5, 2.6],    # north of gate 4 (world Y > 0 = gate_frame_X > 0 ✓)
+            [0.625, 2.5, 2.6],    # north of virtual gate
             dtype=torch.float32, device=self.device
         )
         up_vel = torch.tensor(
-            [0.1, -3.0, -0.5],  # heading south toward gate 4, slight descent
+            [0.0, -4.0, -0.5],    # heading south toward virtual gate
             dtype=torch.float32, device=self.device
         )
-        self._seed_loop_buffer(LOOP_GATE_ID, up_pos, up_vel)
 
-        # Phase 2: crested the arc, coming down from directly above
         via_pos = torch.tensor(
-            [0.6, 1.4, 3.0],    # still north of gate 4, higher — on the way down
+            [0.625, 3.5, 3.0],    # further north, higher — earlier in arc
             dtype=torch.float32, device=self.device
         )
         approach_vel = torch.tensor(
-            [0.0, -4.0, -0.8],  # heading directly south and descending
+            [0.0, -3.0, -1.0],    # heading south and descending
             dtype=torch.float32, device=self.device
         )
+        self._seed_loop_buffer(LOOP_GATE_ID, up_pos, up_vel)
         self._seed_loop_buffer(LOOP_GATE_ID, via_pos, approach_vel)
 
         # Fix the debug check too
