@@ -176,7 +176,7 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["backward_crossing"]  # adds extra backwards_crossing key 
+            extra_keys = ["backward_crossing",  "approach_angle"]  # adds extra backwards_crossing key 
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -321,40 +321,79 @@ class DefaultQuadcopterStrategy:
         crossed_gate_backward = ((prev_drone_position < 0.0) & (current_drone_position_X >= 0.0) & crossed_inside_expanded_gate)
 
         return gate_passed, gate_missed, crossed_gate_backward
-    
+    def _calculate_approach_angle_reward(
+        self,
+        gate_centers: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Reward velocity alignment with the gate normal when within approach radius.
+        This incentivizes approaching the gate face directly rather than at an angle,
+        preventing wide looping paths before gate entry.
+        """
+        drone_pos = self.env._robot.data.root_link_pos_w
+        vel_w = self.env._robot.data.root_com_lin_vel_w
+
+        # Distance to current gate center
+        dist_to_gate = torch.norm(drone_pos - gate_centers, dim=1)
+
+        # Gate normal vectors (X axis of gate frame = approach direction)
+        gate_normals = self.env._normal_vectors[self.env._idx_wp]  # [num_envs, 3]
+
+        # Velocity magnitude
+        vel_mag = torch.norm(vel_w, dim=1, keepdim=True).clamp(min=0.1)
+        vel_unit = vel_w / vel_mag
+
+        # Dot product between velocity direction and gate normal
+        # +1.0 = flying perfectly into the gate face
+        # -1.0 = flying directly away from it
+        alignment = (vel_unit * gate_normals).sum(dim=1)  # [-1, 1]
+
+        # Only activate within approach radius, scale by distance (stronger closer to gate)
+        approach_radius = 3.0  # meters — tune based on track scale
+        in_range = (dist_to_gate < approach_radius).float()
+
+        # Weight by how close the drone is: reward grows as drone gets closer to gate
+        proximity_weight = (1.0 - dist_to_gate / approach_radius).clamp(min=0.0)
+
+        # Only reward positive alignment (approaching), don't double-penalize flying away
+        approach_reward = alignment.clamp(min=0.0) * proximity_weight * in_range
+
+        return approach_reward
     def _calculate_progress_reward(
         self,
         crossed_gate_correct_direction: torch.Tensor,
         gate_centers: torch.Tensor,
     ) -> torch.Tensor:
-        """Dense reward signal at every timestep based on how much closer drone got to current gate compared to last"""
-        
-        # stored distrance from last timestep
-        prev_distance = self._prev_distance_to_gate.clone()
+        """
+        Progress measured along the gate's approach axis (X in gate frame),
+        not Euclidean distance. This prevents the drone from finding looping
+        paths that reduce distance without actually approaching the gate face.
+        """
+        prev_x = self._prev_pose_drone_wrt_gate[:, 0].clone()  # X in gate frame last step
+        current_x = self.env._pose_drone_wrt_gate[:, 0]        # X in gate frame this step
 
-        current_pos = self.env._robot.data.root_link_pos_w
-
-        successful_crossed = torch.where(crossed_gate_correct_direction)[0]     # id's for success / fail gate crossings
+        successful_crossed = torch.where(crossed_gate_correct_direction)[0]
         not_successful_crossed = torch.where(~crossed_gate_correct_direction)[0]
-        
+
         current_distance = torch.zeros(self.num_envs, device=self.device)
-        
-        # for successful cross: progress = distance from prev_pos to gate plane
+
+        # For successful crossing: reward the final approach distance (X before crossing)
         if successful_crossed.numel() > 0:
-            # X coords of pose that succeeded
-            prev_distance[successful_crossed] = self._prev_pose_drone_wrt_gate[successful_crossed][:, 0]
+            prev_x[successful_crossed] = self._prev_pose_drone_wrt_gate[successful_crossed, 0]
             current_distance[successful_crossed] = 0.0
 
-        # for failed cross: progress = euclidean distance to current gate center
+        # For non-crossing: use gate-frame X distance
+        # clamp to 0 so we don't reward negative X (drone has already passed through)
         if not_successful_crossed.numel() > 0:
-            current_gate_pos = gate_centers[not_successful_crossed]
-            current_distance[not_successful_crossed] = torch.norm(current_pos[not_successful_crossed] - current_gate_pos, dim=1)
-        
-        # positive progress is made when curr < prev
-        progress = prev_distance - current_distance
+            current_distance[not_successful_crossed] = current_x[not_successful_crossed].clamp(min=0.0)
+
+        # Progress = reduction in X distance to gate plane
+        # Only reward when drone is in front of gate (prev_x > 0)
+        # Clamp prev_x too so we don't give huge rewards when resetting behind a gate
+        prev_x_clamped = prev_x.clamp(min=0.0)
+        progress = prev_x_clamped - current_distance
+
         return progress, current_distance
-
-
     def _calculate_next_gate_progress(
         self,
         crossed_gate_correct_direction: torch.Tensor,
@@ -565,6 +604,9 @@ class DefaultQuadcopterStrategy:
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
             velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
 
+            approach_angle_reward = self._calculate_approach_angle_reward(gate_centers)
+            approach_angle_scaled = approach_angle_reward * self.env.rew.get('approach_angle_reward_scale', 3.0)
+
             # Aggregate all components
             rewards = {
                 "progress_goal": progress_reward,
@@ -574,6 +616,7 @@ class DefaultQuadcopterStrategy:
                 "yaw_rate": yaw_rate_penalty,
                 "backward_crossing": backward_penalty,
                 "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
+                "approach_angle": approach_angle_scaled,   # ADD THIS
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             

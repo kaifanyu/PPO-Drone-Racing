@@ -168,6 +168,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'wrong_direction_penalty': -600.0,   # hitting a gate from the wrong side
         'out_of_order_gate_penalty': -350.0, # passing any gate other than the current target
         'velocity_toward_gate_reward_scale': 4.0,   # <-- ADD THIS
+        'approach_angle_reward_scale': 3.0,  # ADD THIS — tune between 2.0 and 6.0
     }
     # TODO ----- END -----
 

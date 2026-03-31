@@ -18,7 +18,17 @@ else:
 
 import argparse
 
+# Ensure project root is on the path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+    print(f"[INFO] Added project root to sys.path: {project_root}")
+
+
 from isaaclab.app import AppLauncher
+
+# local imports
+import cli_args  # isort: skip
 
 # local imports
 import cli_args  # isort: skip
@@ -68,6 +78,9 @@ from isaaclab_rl.rsl_rl import (
 
 # Import extensions to set up environment tasks
 import src.isaac_quad_sim2real.tasks   # noqa: F401
+
+LAP_TARGET = 3
+
 
 def main():
     """Play with RSL-RL agent."""
@@ -122,6 +135,27 @@ def main():
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env)
 
+    # --- Timing setup ---
+    # Each env step covers `decimation` simulation steps at `sim_freq` Hz,
+    # so: elapsed_seconds = step_count * decimation / sim_freq
+    # --- Timing setup ---
+    sim_freq = int(round(1.0 / env_cfg.sim.dt))
+    decimation = env_cfg.decimation
+    seconds_per_step = decimation / sim_freq
+    num_envs = env.unwrapped.num_envs
+
+    global_step = 0
+    # For each env: which global_step did the current episode begin?
+    episode_start_step = torch.zeros(num_envs, dtype=torch.long)
+    prev_lap_counts    = torch.zeros(num_envs, dtype=torch.long)
+    finished           = torch.zeros(num_envs, dtype=torch.bool)
+
+    print(
+        f"[INFO] Lap timer | sim_freq={sim_freq} Hz | decimation={decimation} "
+        f"| seconds_per_step={seconds_per_step:.6f} s | target={LAP_TARGET} laps"
+    )
+    # ---------------------
+
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
     ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
@@ -145,23 +179,55 @@ def main():
     if hasattr(obs, "get"):  # Check if it's a TensorDict
         obs = obs["policy"]  # Extract the policy observation
     timestep = 0
-    # simulate environment
+
     while simulation_app.is_running():
-        # run everything in inference mode
         with torch.inference_mode():
-            # agent stepping
             actions = policy(obs)
-            # env stepping
             obs, rewards, dones, infos = env.step(actions)
-            # Extract tensor from TensorDict for policy
-            if hasattr(obs, "get"):  # Check if it's a TensorDict
-                obs = obs["policy"]  # Extract the policy observation
+            if hasattr(obs, "get"):
+                obs = obs["policy"]
+
+            global_step += 1
+
+            # --- Lap timing ---
+            unwrapped = env.unwrapped
+            if hasattr(unwrapped, "_yaw_n_laps"):
+                curr_lap_counts = unwrapped._yaw_n_laps.long().cpu()
+
+                # Detect completion BEFORE processing resets
+                newly_finished = (
+                    ~finished
+                    & (curr_lap_counts >= LAP_TARGET)
+                    & (prev_lap_counts < LAP_TARGET)
+                )
+                for env_idx in newly_finished.nonzero(as_tuple=False).squeeze(1).tolist():
+                    elapsed_steps = global_step - episode_start_step[env_idx].item()
+                    elapsed_secs  = elapsed_steps * decimation / sim_freq
+                    print(
+                        f"[TIMING] Env {env_idx:>3d} | {LAP_TARGET} laps completed | "
+                        f"{elapsed_steps} steps | {elapsed_secs:.3f} s"
+                    )
+
+                finished       |= newly_finished
+                # Only advance prev_lap_counts for envs still racing
+                prev_lap_counts = torch.where(finished, prev_lap_counts, curr_lap_counts)
+
+                # Now handle resets: episode_start_step marks where the NEW episode begins
+                reset_mask = dones.bool().cpu()
+                episode_start_step[reset_mask & ~finished] = global_step
+                prev_lap_counts   [reset_mask & ~finished] = 0   # _yaw_n_laps resets on env reset
+                finished          [reset_mask]              = False
+
+                # Optional: periodic debug to verify _yaw_n_laps is evolving correctly
+                if global_step % 100 == 0:
+                    print(f"[DEBUG] step={global_step} | _yaw_n_laps={curr_lap_counts.tolist()} "
+                          f"| episode_start={episode_start_step.tolist()}")
+            # ------------------
+
         if args_cli.video:
             timestep += 1
-            # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
-
     # close the simulator
     env.close()
 
