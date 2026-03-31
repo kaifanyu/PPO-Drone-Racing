@@ -176,7 +176,7 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["backward_crossing", "lap_time_bonus"]  # adds extra backwards_crossing key 
+            extra_keys = ["backward_crossing"]  # adds extra backwards_crossing key 
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -217,8 +217,6 @@ class DefaultQuadcopterStrategy:
         
         # Track previous position wrt previous gate for backward crossing calculation
         self._prev_pose_drone_wrt_prev_gate = torch.zeros(self.num_envs, 3, device=self.device)
-
-        self._prev_laps_completed = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
 
         # Initialize reset buffer for curriculum learning
@@ -561,23 +559,11 @@ class DefaultQuadcopterStrategy:
             next_gate_dir_unit = next_gate_dir / next_gate_dist
 
             # 80% toward current gate, 20% toward next — tightens corner anticipation
-            blended_dir = 0.7 * gate_dir_unit + 0.3 * next_gate_dir_unit
+            blended_dir = 0.8 * gate_dir_unit + 0.2 * next_gate_dir_unit
             blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
 
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
             velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
-
-
-            # ---- ADD THESE LINES after laps_completed is computed ----
-            # Detect which envs completed a new lap THIS step
-            new_lap_completed = (laps_completed > self._prev_laps_completed).float()
-            self._prev_laps_completed = laps_completed.clone()
-
-            # Bonus scales with how much time is LEFT — finishing early = bigger reward
-            # time_remaining goes from 1.0 (start) to 0.0 (timeout)
-            time_remaining = 1.0 - (self.env.episode_length_buf.float() / self.env.max_episode_length)
-            lap_time_bonus = new_lap_completed * time_remaining * self.env.rew['lap_time_bonus_scale']
-            # ---- END ADDED LINES ----
 
             # Aggregate all components
             rewards = {
@@ -588,7 +574,6 @@ class DefaultQuadcopterStrategy:
                 "yaw_rate": yaw_rate_penalty,
                 "backward_crossing": backward_penalty,
                 "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
-                "lap_time_bonus": lap_time_bonus,    # <-- ADD THIS
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             
@@ -721,8 +706,7 @@ class DefaultQuadcopterStrategy:
         self.env._previous_omega_meas[env_ids_tensor] = 0.0
         self.env._previous_omega_err[env_ids_tensor] = 0.0
         self.env._omega_err_integral[env_ids_tensor] = 0.0
-        
-        self._prev_laps_completed[env_ids_tensor] = 0
+
         # Reset joints state
         joint_pos = self.env._robot.data.default_joint_pos[env_ids_tensor]
         joint_vel = self.env._robot.data.default_joint_vel[env_ids_tensor]
@@ -929,3 +913,4 @@ class DefaultQuadcopterStrategy:
         self._prev_distance_to_gate[env_ids_tensor] = torch.norm(drone_pos - gate_pos, dim=1)
 
         self.env._crashed[env_ids_tensor] = 0
+        
