@@ -547,27 +547,24 @@ class DefaultQuadcopterStrategy:
             # Clamped to 0 so flying away from a gate is not double-penalized here.
             vel_w = self.env._robot.data.root_com_lin_vel_w
             # Replace your current velocity reward block with this
-            # AFTER (3-gate blend):
             next_gate_centers = self.env._waypoints[next_gate_indices, :3]
-            next_next_gate_indices = (self.env._idx_wp + 2) % num_gates          # ADD THIS
-            next_next_gate_centers = self.env._waypoints[next_next_gate_indices, :3]  # ADD THIS
 
-            drone_pos = self.env._robot.data.root_link_pos_w
+            gate_dir = gate_centers - self.env._robot.data.root_link_pos_w
+            next_gate_dir = next_gate_centers - self.env._robot.data.root_link_pos_w
 
-            gate_dir = gate_centers - drone_pos
-            next_gate_dir = next_gate_centers - drone_pos
-            next_next_gate_dir = next_next_gate_centers - drone_pos              # ADD THIS
+            gate_dist = torch.norm(gate_dir, dim=1, keepdim=True).clamp(min=0.1)
+            next_gate_dist = torch.norm(next_gate_dir, dim=1, keepdim=True).clamp(min=0.1)
 
-            gate_dir_unit = gate_dir / torch.norm(gate_dir, dim=1, keepdim=True).clamp(min=0.1)
-            next_gate_dir_unit = next_gate_dir / torch.norm(next_gate_dir, dim=1, keepdim=True).clamp(min=0.1)
-            next_next_gate_dir_unit = next_next_gate_dir / torch.norm(next_next_gate_dir, dim=1, keepdim=True).clamp(min=0.1)  # ADD THIS
+            gate_dir_unit = gate_dir / gate_dist
+            next_gate_dir_unit = next_gate_dir / next_gate_dist
 
-            # 70% current, 20% next, 10% next-next
-            blended_dir = 0.7 * gate_dir_unit + 0.2 * next_gate_dir_unit + 0.1 * next_next_gate_dir_unit  # CHANGE THIS
+            # 80% toward current gate, 20% toward next — tightens corner anticipation
+            blended_dir = 0.8 * gate_dir_unit + 0.2 * next_gate_dir_unit
             blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
 
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
             velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
+
             # Aggregate all components
             rewards = {
                 "progress_goal": progress_reward,
@@ -625,31 +622,15 @@ class DefaultQuadcopterStrategy:
         quat_w = self.env._robot.data.root_quat_w
         attitude_mat = matrix_from_quat(quat_w)
 
-        next_next_idx = (self.env._idx_wp + 2) % self.env._waypoints.shape[0]  # ADD THIS
-        wp_next_next_pos = self.env._waypoints[next_next_idx, :3]  # ADD THIS
-        quat_next_next = self.env._waypoints_quat[next_next_idx]  # ADD THIS
-        rot_next_next = matrix_from_quat(quat_next_next)  # ADD THIS
-        verts_next_next = torch.bmm(self.env._local_square, rot_next_next.transpose(1, 2)) + wp_next_next_pos.unsqueeze(1) + self.env._terrain.env_origins.unsqueeze(1)  # ADD THIS
-        waypoint_pos_b_next_next, _ = subtract_frame_transforms(
-            self.env._robot.data.root_link_state_w[:, :3].repeat_interleave(4, dim=0),
-            self.env._robot.data.root_link_state_w[:, 3:7].repeat_interleave(4, dim=0),
-            verts_next_next.view(-1, 3)
-        )
-        waypoint_pos_b_next_next = waypoint_pos_b_next_next.view(self.num_envs, 4, 3)
-
-        quat_w = self.env._robot.data.root_quat_w
-        attitude_mat = matrix_from_quat(quat_w)
-
         obs = torch.cat(
             [
-                self.env._robot.data.root_com_lin_vel_b,                              # 3 dim
-                attitude_mat.view(attitude_mat.shape[0], -1),                         # 9 dim
-                waypoint_pos_b_curr.view(waypoint_pos_b_curr.shape[0], -1),           # 12 dim
-                waypoint_pos_b_next.view(waypoint_pos_b_next.shape[0], -1),           # 12 dim
-                waypoint_pos_b_next_next.view(waypoint_pos_b_next_next.shape[0], -1), # 12 dim  ADD THIS
+                self.env._robot.data.root_com_lin_vel_b,			# 3 dim (linear vel in body frame)
+                attitude_mat.view(attitude_mat.shape[0], -1),			# 9 dim (drone rotation matrix)
+                waypoint_pos_b_curr.view(waypoint_pos_b_curr.shape[0], -1),	# 12 dim (corners of current gate)
+                waypoint_pos_b_next.view(waypoint_pos_b_next.shape[0], -1),	# 12 dim (corners of next gate)
             ],
             dim=-1,
-        )  # total: 3+9+12+12+12 = 48 (was 36)
+        )
         observations = {"policy": obs}
 
         # Update yaw tracking
