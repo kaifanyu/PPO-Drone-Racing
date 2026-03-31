@@ -756,7 +756,7 @@ class DefaultQuadcopterStrategy:
             blended_dir = blend_w / torch.norm(blend_w, dim=1, keepdim=True).clamp(min=0.1)
 
             dist_to_gate_scalar = gate_dist.squeeze(1)
-            dist_weight = (1.0 - (dist_to_gate_scalar - 3.0) / 4.0).clamp(min=0.2, max=1.0)
+            dist_weight = (1.0 - (dist_to_gate_scalar - 3.0) / 4.0).clamp(min=0.2, max=1.3)
 
 
             # AFTER — gate 4 requires an arc, straight-line velocity reward fights it
@@ -779,6 +779,9 @@ class DefaultQuadcopterStrategy:
             approach_angle_reward = self._calculate_approach_angle_reward(gate_centers)
             approach_angle_scaled = approach_angle_reward * self.env.rew.get('approach_angle_reward_scale', 3.0)
 
+            speed = torch.norm(vel_w, dim=1)
+            speed_reward = speed * 0.3  # tune between 0.1 and 0.5
+
             # Aggregate all components
             rewards = {
                 "progress_goal": progress_reward,
@@ -789,6 +792,7 @@ class DefaultQuadcopterStrategy:
                 "backward_crossing": backward_penalty,
                 "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
                 "approach_angle": approach_angle_scaled,   # ADD THIS
+                "speed": speed_reward,
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             
