@@ -236,44 +236,39 @@ class DefaultQuadcopterStrategy:
             noise_std=noise_std
         )
 
-        LOOP_GATE_ID = 4
+        LOOP_GATE_ID = 3  # gate 4 counting from 1, at [0.625, 0.0, 0.75]
 
-        # State 1: drone just exited gate 3, going DIRECTLY UP with minimal Y drift
-        # pos: just past gate 3 exit, elevated
-        # vel: strong Z up, minimal Y — this is the "directly up" phase
+        # Phase 1: drone has swung north, elevated, beginning descent toward gate 4
         up_pos = torch.tensor(
-            [-2.5, -1.8, 2.8],   # gate_frame_X ≈ 2.4, safely on approach side
+            [0.4, 2.5, 2.6],    # north of gate 4 (world Y > 0 = gate_frame_X > 0 ✓)
             dtype=torch.float32, device=self.device
         )
         up_vel = torch.tensor(
-            [2.0, -2.0, 0.5],    # heading SE toward gate 4, slight descent
+            [0.1, -3.0, -0.5],  # heading south toward gate 4, slight descent
             dtype=torch.float32, device=self.device
         )
         self._seed_loop_buffer(LOOP_GATE_ID, up_pos, up_vel)
 
-        # State 2: crested the arc, now heading NW toward gate 4 approach side
-        # pos: above and NW of gate 4, on the correct approach side
-        # vel: heading SE toward gate 4 center
+        # Phase 2: crested the arc, coming down from directly above
         via_pos = torch.tensor(
-            [-3.6, -1.4, 2.5],   # NW of gate 4, gate_frame_X ≈ +3.0
+            [0.6, 1.4, 3.0],    # still north of gate 4, higher — on the way down
             dtype=torch.float32, device=self.device
         )
         approach_vel = torch.tensor(
-            [3.4, -3.4, -0.3],   # SE toward gate 4
+            [0.0, -4.0, -0.8],  # heading directly south and descending
             dtype=torch.float32, device=self.device
         )
         self._seed_loop_buffer(LOOP_GATE_ID, via_pos, approach_vel)
 
-        # Debug check
-        gate_4_pos  = self.env._waypoints[4, :3]
-        gate_4_quat = self.env._waypoints_quat[4, :]
+        # Fix the debug check too
+        gate_3_pos  = self.env._waypoints[LOOP_GATE_ID, :3]
+        gate_3_quat = self.env._waypoints_quat[LOOP_GATE_ID, :]
         for label, p in [("Up-phase ", up_pos), ("Via-point", via_pos)]:
             p_in_frame, _ = subtract_frame_transforms(
-                gate_4_pos.unsqueeze(0), gate_4_quat.unsqueeze(0), p.unsqueeze(0)
+                gate_3_pos.unsqueeze(0), gate_3_quat.unsqueeze(0), p.unsqueeze(0)
             )
             print(f"[DEBUG] {label} gate_frame_X = {p_in_frame[0,0]:.3f}  (must be > 0)")
         print(f"[INFO]  Gate {LOOP_GATE_ID} buffer seeded with {self._reset_buffer.get_count(LOOP_GATE_ID)} states")
-        
 
 
     def _randomize_dynamics(self, env_ids: torch.Tensor):
@@ -422,13 +417,13 @@ class DefaultQuadcopterStrategy:
         gate_centers: torch.Tensor,
     ) -> torch.Tensor:
         LOOP_GATE_IDX = 4
-        via_point = torch.tensor([-3.8, -1.2, 3.5], device=self.device)
+        via_point = torch.tensor([0.5, 2.2, 2.8], device=self.device)
 
         drone_pos = self.env._robot.data.root_link_pos_w
         gate_frame_x = self.env._pose_drone_wrt_gate[:, 0]
 
         targeting_loop = (self.env._idx_wp == LOOP_GATE_IDX)
-        needs_arc = targeting_loop & (gate_frame_x < 1.0)
+        needs_arc = targeting_loop & (gate_frame_x < 3.0)
 
         # Effective gate center for distance computation
         effective_centers = gate_centers.clone()
@@ -662,12 +657,12 @@ class DefaultQuadcopterStrategy:
             LOOP_GATE_IDX = 4
             # World-frame via-point: high and NW of gate 4, on the correct approach side
             # gate_4_center + ~3.5m * gate_4_normal + altitude
-            via_point = torch.tensor([-3.8, -1.2, 3.5], device=self.device)
+            via_point = torch.tensor([0.5, 2.2, 2.8], device=self.device)
 
             # Determine if drone needs to arc (targeting gate 4 AND on wrong/exit side)
             targeting_loop = (self.env._idx_wp == LOOP_GATE_IDX)
             gate_frame_x = self.env._pose_drone_wrt_gate[:, 0]
-            on_wrong_side = gate_frame_x < 1.0  # not yet on approach side
+            on_wrong_side = gate_frame_x < 3.0
             needs_arc = targeting_loop & on_wrong_side
 
             # Effective target: via-point for arcing envs, gate center otherwise
@@ -698,7 +693,7 @@ class DefaultQuadcopterStrategy:
             # When gate 4 is the target AND drone is far from it, suppress velocity reward entirely
             gate_4_idx = 4
             is_gate_4 = (self.env._idx_wp == gate_4_idx)
-            far_from_gate = (dist_to_gate_scalar > 3.0)
+            far_from_gate = (dist_to_gate_scalar > 2.0)
 
             # For gate 4 when far away: drop velocity reward to 0 so the arc isn't punished
             # For all other gates and close range: use normal velocity reward
