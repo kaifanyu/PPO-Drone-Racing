@@ -158,16 +158,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'progress_goal_reward_scale':               30.0,
         'target_reached_bonus_reward_scale':        700.0,
         'death_cost':                               -500.0,
-        'lap_incomplete_penalty_reward_scale':      -0.15,
-        'roll_pitch_rates_reward_scale':            -0.2,
-        'yaw_rate_reward_scale':                    -0.2,
+        'lap_incomplete_penalty_reward_scale':      -0.05,
+        'roll_pitch_rates_reward_scale':            -0.4,
+        'yaw_rate_reward_scale':                    -0.4,
         'wrong_direction_penalty':                  -600.0,   # hitting a gate from the wrong side
-        'out_of_order_gate_penalty':                -350.0, # passing any gate other than the current target
-        'velocity_toward_gate_reward_scale':        7.0,   # <-- ADD THIS
-        'speed_reward_scale':                       0.5,       # NEW
-        'speed_at_crossing_reward_scale':           2.0,
-        'lap_time_reward_scale':                    200.0,  # a 5s lap gives 40.0, a 10s lap gives 20.0
-        'segment_time_penalty_scale':               0.02,
+        'velocity_toward_gate_reward_scale':        6.0,   # <-- ADD THIS
+        'speed_at_crossing_reward_scale': 10.0,
+        'segment_time_penalty_scale': 0.02,
+        'lap_time_reward_scale': 200.0,
 
     }
     # TODO ----- END -----
