@@ -155,7 +155,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 
     rewards = {
-        'progress_goal_reward_scale':               40.0,
+        'progress_goal_reward_scale':               30.0,
         'target_reached_bonus_reward_scale':        700.0,
         'death_cost':                               -500.0,
         'lap_incomplete_penalty_reward_scale':      -0.1,
@@ -164,7 +164,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'wrong_direction_penalty':                  -600.0,   # hitting a gate from the wrong side
         'out_of_order_gate_penalty':                -350.0, # passing any gate other than the current target
         'velocity_toward_gate_reward_scale':         15.0,   # <-- ADD THIS
-        'speed_reward_scale':                        0.1,   # NEW
     }
     # TODO ----- END -----
 
