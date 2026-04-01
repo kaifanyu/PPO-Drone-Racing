@@ -532,11 +532,11 @@ class DefaultQuadcopterStrategy:
             
             # penalize aggressive roll and pitch rates for more stability
             roll_pitch_rates = torch.sum(torch.square(self.env._actions[:, 1:3]), dim=1)
-            roll_pitch_rates_penalty = roll_pitch_rates * self.env.rew['roll_pitch_rates_reward_scale'] * self.env.step_dt
+            # roll_pitch_rates_penalty = roll_pitch_rates * self.env.rew['roll_pitch_rates_reward_scale'] * self.env.step_dt
             
             # penalize aggressive yaw rates
             yaw_rate = torch.square(self.env._actions[:, 3])
-            yaw_rate_penalty = yaw_rate * self.env.rew['yaw_rate_reward_scale'] * self.env.step_dt
+            # yaw_rate_penalty = yaw_rate * self.env.rew['yaw_rate_reward_scale'] * self.env.step_dt
 
             # wrong direction penalty
             wrong_direction = (gate_crossed_backward | prev_gate_crossed_backward).float()
@@ -570,8 +570,8 @@ class DefaultQuadcopterStrategy:
                 "progress_goal": progress_reward,
                 "target_reached_bonus": gate_reward_scaled,
                 "lap_incomplete_penalty": lap_penalty,
-                "roll_pitch_rates": roll_pitch_rates_penalty,
-                "yaw_rate": yaw_rate_penalty,
+                # "roll_pitch_rates": roll_pitch_rates_penalty,
+                # "yaw_rate": yaw_rate_penalty,
                 "backward_crossing": backward_penalty,
                 "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
             }
