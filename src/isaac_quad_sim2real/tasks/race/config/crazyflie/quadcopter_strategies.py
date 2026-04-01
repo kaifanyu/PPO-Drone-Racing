@@ -195,7 +195,7 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["speed_at_crossing"]  # adds extra backwards_crossing key 
+            extra_keys = ["speed_at_crossing", "loop_speed_penalty", "three_lap_time_bonus"]  # adds extra backwards_crossing key 
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -691,21 +691,6 @@ class DefaultQuadcopterStrategy:
             progress_reward = progress * self.env.rew['progress_goal_reward_scale']
             gate_reward_scaled = gate_reward * self.env.rew['target_reached_bonus_reward_scale']
             
-            # Lap incomplete penalty per-step until 3
-            laps_completed = self.env._n_gates_passed // num_gates
-            lap_penalty = (self.env.rew['lap_incomplete_penalty_reward_scale'] * (laps_completed < 3).float())
-            
-            # penalize aggressive roll and pitch rates for more stability
-            roll_pitch_rates = torch.sum(torch.square(self.env._actions[:, 1:3]), dim=1)
-            # roll_pitch_rates_penalty = roll_pitch_rates * self.env.rew['roll_pitch_rates_reward_scale'] * self.env.step_dt
-            
-            # penalize aggressive yaw rates
-            yaw_rate = torch.square(self.env._actions[:, 3])
-            # yaw_rate_penalty = yaw_rate * self.env.rew['yaw_rate_reward_scale'] * self.env.step_dt
-
-            # wrong direction penalty
-            wrong_direction = (gate_crossed_backward | prev_gate_crossed_backward).float()
-
             # ---- ADD THESE LINES ----
             # Reward velocity component pointing directly at current gate center.
             # Clamped to 0 so flying away from a gate is not double-penalized here.
@@ -727,16 +712,46 @@ class DefaultQuadcopterStrategy:
             blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
 
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=-1.0)
-            velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
-
             crossing_speed = torch.norm(vel_w, dim=1)
-            speed_at_crossing_bonus = gate_passed.float() * crossing_speed * self.env.rew['speed_at_crossing_reward_scale']
+            
+            VIRTUAL_GATE_IDX = 3
+            LOOP_GATE_IDX    = 4
+            loop_segment_mask = (
+                (self.env._idx_wp == VIRTUAL_GATE_IDX) |
+                (self.env._idx_wp == LOOP_GATE_IDX)
+            ).float()   # [num_envs], 1.0 in loop, 0.0 elsewhere
+            normal_mask = 1.0 - loop_segment_mask
+
+            # Velocity toward gate — full scale outside loop, reduced inside
+            velocity_toward_gate_scale_normal = self.env.rew['velocity_toward_gate_reward_scale']  # e.g. 35.0
+            velocity_toward_gate_scale_loop   = 5.0   # suppressed in arc
+
+            effective_vel_scale = (
+                normal_mask * velocity_toward_gate_scale_normal +
+                loop_segment_mask * velocity_toward_gate_scale_loop
+            )
+            velocity_reward = vel_toward_gate * effective_vel_scale   # [num_envs]
+
+            # Speed at crossing — full scale outside loop, near-zero inside
+            speed_at_crossing_scale_normal = self.env.rew['speed_at_crossing_reward_scale']  # e.g. 50.0
+            speed_at_crossing_scale_loop   = 5.0
+
+            effective_crossing_scale = (
+                normal_mask * speed_at_crossing_scale_normal +
+                loop_segment_mask * speed_at_crossing_scale_loop
+            )
+            speed_at_crossing_bonus = gate_passed.float() * crossing_speed * effective_crossing_scale
+
+            loop_speed_cap   = 4.0   # m/s — tune this
+            excess_speed     = (crossing_speed - loop_speed_cap).clamp(min=0.0)
+            loop_speed_penalty = -loop_segment_mask * excess_speed * 8.0   # scale to taste
             # Aggregate all components
 
             laps_completed = self.env._n_gates_passed // num_gates
             just_finished_3_laps = (laps_completed >= 3) & (
                 (self.env._n_gates_passed - gate_passed.long()) // num_gates < 3
             )
+            lap_penalty = (self.env.rew['lap_incomplete_penalty_reward_scale'] * (laps_completed < 3).float())
 
             # time_remaining goes from max_episode_length down to 0
             time_remaining = (self.env.max_episode_length - self.env.episode_length_buf).float()
@@ -751,6 +766,7 @@ class DefaultQuadcopterStrategy:
                 "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
                 "speed_at_crossing": speed_at_crossing_bonus,
                 "three_lap_time_bonus": time_bonus,
+                "loop_speed_penalty":   loop_speed_penalty,   # ← new
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             
