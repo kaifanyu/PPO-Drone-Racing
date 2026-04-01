@@ -176,7 +176,7 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["backward_crossing", "speed"]  # adds extra backwards_crossing key 
+            extra_keys = ["backward_crossing", "speed", "segment_time"]  # adds extra backwards_crossing key 
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -288,61 +288,99 @@ class DefaultQuadcopterStrategy:
         VIRTUAL_GATE_ID = 3
 
         # These states represent the drone mid-arc: 
-        # elevated, north of gate stack, heading south
         up_pos = torch.tensor(
-            [0.625, 2.8, 2.4],           # north of virtual gate, approaching from behind
+            [0.625, 1.0, 2.0],            # ~1m north of virtual gate, above it
             dtype=torch.float32, device=self.device
         )
         up_vel = torch.tensor(
-            [0.0, -3.5, -0.3],           # heading south toward virtual gate
+            [0.0, -3.5, -0.3],            # heading south through virtual gate
             dtype=torch.float32, device=self.device
         )
         self._seed_loop_buffer(VIRTUAL_GATE_ID, up_pos, up_vel)
 
         via_pos = torch.tensor(
-            [0.625, 3.5, 2.8],           # further north, higher up — earlier in arc
+            [0.625, 1.5, 2.3],            # earlier in arc — slightly further north/higher
             dtype=torch.float32, device=self.device
         )
         approach_vel = torch.tensor(
-            [0.0, -2.0, -1.0],           # heading south and descending
+            [0.0, -2.5, -0.8],            # heading south and beginning descent
             dtype=torch.float32, device=self.device
         )
         self._seed_loop_buffer(VIRTUAL_GATE_ID, via_pos, approach_vel)
 
         LOOP_GATE_ID = 4  # gate 4 counting from 1, at [0.625, 0.0, 0.75]
-
-        # Phase 1: drone has swung north, elevated, beginning descent toward gate 4
-        # Drone is north of virtual gate, heading south and slightly down
+        # AFTER — drone has just passed virtual gate, now descending into gate 4
         up_pos = torch.tensor(
-            [0.625, 2.5, 2.6],    # north of virtual gate
+            [0.625, 0.2, 1.6],            # just past virtual gate, beginning steep descent
             dtype=torch.float32, device=self.device
         )
         up_vel = torch.tensor(
-            [0.0, -4.0, -0.5],    # heading south toward virtual gate
-            dtype=torch.float32, device=self.device
-        )
-
-        via_pos = torch.tensor(
-            [0.625, 3.5, 3.0],    # further north, higher — earlier in arc
-            dtype=torch.float32, device=self.device
-        )
-        approach_vel = torch.tensor(
-            [0.0, -3.0, -1.0],    # heading south and descending
+            [0.0, -1.5, -2.5],            # heading south and steeply down into gate 4
             dtype=torch.float32, device=self.device
         )
         self._seed_loop_buffer(LOOP_GATE_ID, up_pos, up_vel)
+
+        via_pos = torch.tensor(
+            [0.625, 0.5, 1.9],            # slightly before virtual gate, mid-descent
+            dtype=torch.float32, device=self.device
+        )
+        approach_vel = torch.tensor(
+            [0.0, -2.0, -2.0],            # south and down
+            dtype=torch.float32, device=self.device
+        )
         self._seed_loop_buffer(LOOP_GATE_ID, via_pos, approach_vel)
 
-        # Fix the debug check too
-        gate_4_pos  = self.env._waypoints[LOOP_GATE_ID, :3]   # reads index 4 = real loop gate
+        # ── Gate world positions ──────────────────────────────────────────────
+        gate_3_pos  = self.env._waypoints[2, :3]          # real gate 3 (index 2)
+        gate_v_pos  = self.env._waypoints[VIRTUAL_GATE_ID, :3]  # virtual gate (index 3)
+        gate_4_pos  = self.env._waypoints[LOOP_GATE_ID, :3]     # real loop gate (index 4)
         gate_4_quat = self.env._waypoints_quat[LOOP_GATE_ID, :]
-        for label, p in [("Up-phase ", up_pos), ("Via-point", via_pos)]:
+
+        print(f"\n[DEBUG] ── Gate World Positions ──────────────────────────")
+        print(f"[DEBUG] Gate 3  (index 2):        XYZ = {gate_3_pos.cpu().numpy()}")
+        print(f"[DEBUG] Virtual (index 3):        XYZ = {gate_v_pos.cpu().numpy()}")
+        print(f"[DEBUG] Gate 4  (index 4):        XYZ = {gate_4_pos.cpu().numpy()}")
+        print(f"[DEBUG] Virtual is {(gate_v_pos - gate_4_pos).cpu().numpy()} offset from Gate 4")
+
+        # ── Via-point and buffer seeds in world frame ─────────────────────────
+        print(f"\n[DEBUG] ── Via-point / Buffer Seeds (World Frame) ─────────")
+        print(f"[DEBUG] via_point used in arc:    XYZ = {torch.tensor([0.625, 0.8, 2.2]).numpy()}")
+        print(f"[DEBUG] Virtual buffer seed 1:    XYZ = {torch.tensor([0.625, 1.0, 2.0]).numpy()}")
+        print(f"[DEBUG] Virtual buffer seed 2:    XYZ = {torch.tensor([0.625, 1.5, 2.3]).numpy()}")
+        print(f"[DEBUG] Loop    buffer seed 1:    XYZ = {torch.tensor([0.625, 0.2, 1.6]).numpy()}")
+        print(f"[DEBUG] Loop    buffer seed 2:    XYZ = {torch.tensor([0.625, 0.5, 1.9]).numpy()}")
+
+        # ── All seeds expressed in gate 4's local frame ───────────────────────
+        print(f"\n[DEBUG] ── Seeds in Gate 4 Local Frame (X must be > 0) ────")
+        seed_labels = [
+            ("via_point     ", torch.tensor([0.625, 0.8, 2.2], device=self.device)),
+            ("virt_seed_1   ", torch.tensor([0.625, 1.0, 2.0], device=self.device)),
+            ("virt_seed_2   ", torch.tensor([0.625, 1.5, 2.3], device=self.device)),
+            ("loop_seed_1   ", torch.tensor([0.625, 0.2, 1.6], device=self.device)),
+            ("loop_seed_2   ", torch.tensor([0.625, 0.5, 1.9], device=self.device)),
+        ]
+        for label, p in seed_labels:
             p_in_frame, _ = subtract_frame_transforms(
                 gate_4_pos.unsqueeze(0), gate_4_quat.unsqueeze(0), p.unsqueeze(0)
             )
-            print(f"[DEBUG] {label} gate_frame_X = {p_in_frame[0,0]:.3f}  (must be > 0)")
-        print(f"[INFO]  Gate {LOOP_GATE_ID} buffer seeded with {self._reset_buffer.get_count(LOOP_GATE_ID)} states")
+            x, y, z = p_in_frame[0].cpu().numpy()
+            ok = "✓" if x > 0 else "✗ WRONG SIDE"
+            print(f"[DEBUG]   {label}  gate_frame XYZ = ({x:.2f}, {y:.2f}, {z:.2f})  {ok}")
 
+        # ── Vertical clearances ───────────────────────────────────────────────
+        print(f"\n[DEBUG] ── Vertical Clearance Check ───────────────────────")
+        print(f"[DEBUG] Gate 4 Z:         {gate_4_pos[2].item():.3f}m")
+        print(f"[DEBUG] Virtual gate Z:   {gate_v_pos[2].item():.3f}m  (delta = {(gate_v_pos[2] - gate_4_pos[2]).item():.3f}m above gate 4)")
+        print(f"[DEBUG] via_point Z:      2.200m  (delta = {2.2 - gate_4_pos[2].item():.3f}m above gate 4)")
+        print(f"[DEBUG] Expected arc top: ~2.2m,  gate 4 entry: {gate_4_pos[2].item():.3f}m  (descent = {2.2 - gate_4_pos[2].item():.3f}m)")
+
+        # ── Buffer fill counts ────────────────────────────────────────────────
+        print(f"\n[DEBUG] ── Reset Buffer State ─────────────────────────────")
+        for gid, name in [(2, "Gate 3 "), (VIRTUAL_GATE_ID, "Virtual"), (LOOP_GATE_ID, "Gate 4 ")]:
+            count = self._reset_buffer.get_count(gid)
+            print(f"[DEBUG]   {name} (index {gid}): {count} states stored")
+
+        print(f"[DEBUG] ───────────────────────────────────────────────────\n")
 
     def _randomize_dynamics(self, env_ids: torch.Tensor):
         """Randomize dynamics parameters for specified environments.
@@ -442,13 +480,13 @@ class DefaultQuadcopterStrategy:
         gate_centers: torch.Tensor,
     ) -> torch.Tensor:
         LOOP_GATE_IDX = 4
-        via_point = torch.tensor([0.5, 2.2, 2.8], device=self.device)
+        via_point = torch.tensor([0.625, 0.8, 2.2], device=self.device)
 
         drone_pos = self.env._robot.data.root_link_pos_w
         gate_frame_x = self.env._pose_drone_wrt_gate[:, 0]
 
         targeting_loop = (self.env._idx_wp == LOOP_GATE_IDX)
-        needs_arc = targeting_loop & (gate_frame_x < 3.0)
+        needs_arc = targeting_loop & (gate_frame_x < 1.5)
 
         # Effective gate center for distance computation
         effective_centers = gate_centers.clone()
@@ -709,12 +747,12 @@ class DefaultQuadcopterStrategy:
             LOOP_GATE_IDX = 4
             # World-frame via-point: high and NW of gate 4, on the correct approach side
             # gate_4_center + ~3.5m * gate_4_normal + altitude
-            via_point = torch.tensor([0.5, 2.2, 2.8], device=self.device)
+            via_point = torch.tensor([0.625, 0.8, 2.2], device=self.device)
 
             # Determine if drone needs to arc (targeting gate 4 AND on wrong/exit side)
             targeting_loop = (self.env._idx_wp == LOOP_GATE_IDX)
             gate_frame_x = self.env._pose_drone_wrt_gate[:, 0]
-            on_wrong_side = gate_frame_x < 3.0
+            on_wrong_side = gate_frame_x < 1.5
             needs_arc = targeting_loop & on_wrong_side
 
             # Effective target: via-point for arcing envs, gate center otherwise
