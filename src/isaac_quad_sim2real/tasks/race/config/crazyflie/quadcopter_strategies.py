@@ -836,13 +836,13 @@ class DefaultQuadcopterStrategy:
                 "progress_goal": progress_reward,
                 "target_reached_bonus": gate_reward_scaled,
                 "lap_incomplete_penalty": lap_penalty,
-                "roll_pitch_rates": roll_pitch_rates_penalty,
-                "yaw_rate": yaw_rate_penalty,
-                "backward_crossing": backward_penalty,
+                # "roll_pitch_rates": roll_pitch_rates_penalty,
+                # "yaw_rate": yaw_rate_penalty,
+                # "backward_crossing": backward_penalty,
                 "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
                 "speed_at_crossing": speed_at_crossing_bonus,
                 "lap_time": lap_time_bonus,
-                "segment_time": -segment_time_penalty,
+                # "segment_time": -segment_time_penalty,
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             
