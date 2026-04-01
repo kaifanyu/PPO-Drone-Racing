@@ -137,7 +137,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # TODO ----- START ----- Define rewards scales
     # reward scales - override with CLI arguments
-
+    progress_goal_reward_scale = 30.0
+    target_reached_bonus_reward_scale = 600.0
+    death_cost = -500.0
+    lap_incomplete_penalty_reward_scale = -0.05
+    roll_pitch_rates_reward_scale = -0.8  # Penalty for aggressive roll/pitch rates
+    yaw_rate_reward_scale = -0.5  # Penalty for aggressive yaw rate
 
     # CLI overrides for reward scaling
     if args_cli.progress_scale is not None:
@@ -153,19 +158,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.yaw_rate_scale is not None:
         yaw_rate_reward_scale = float(args_cli.yaw_rate_scale)
 
-
     rewards = {
-        'progress_goal_reward_scale':               30.0,
-        'target_reached_bonus_reward_scale':        700.0,
-        'death_cost':                               -500.0,
-        'lap_incomplete_penalty_reward_scale':      -0.05,
-        'roll_pitch_rates_reward_scale':            -0.4,
-        'yaw_rate_reward_scale':                    -0.4,
-        'wrong_direction_penalty':                  -600.0,   # hitting a gate from the wrong side
-        'velocity_toward_gate_reward_scale':        7.0,   # <-- ADD THIS
-        'speed_at_crossing_reward_scale': 10.0,
-        'segment_time_penalty_scale': 0.02,
-        'lap_time_reward_scale': 200.0,
+        'progress_goal_reward_scale': progress_goal_reward_scale,
+        'target_reached_bonus_reward_scale': target_reached_bonus_reward_scale,
+        'death_cost': death_cost,
+        'lap_incomplete_penalty_reward_scale': lap_incomplete_penalty_reward_scale,
+        # 'roll_pitch_rates_reward_scale': roll_pitch_rates_reward_scale,
+        # 'yaw_rate_reward_scale': yaw_rate_reward_scale,
+        'wrong_direction_penalty': -500.0,   # hitting a gate from the wrong side
+        'velocity_toward_gate_reward_scale': 10.0,   # <-- ADD THIS
     }
     # TODO ----- END -----
 
