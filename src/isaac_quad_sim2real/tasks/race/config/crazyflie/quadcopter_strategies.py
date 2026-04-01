@@ -700,7 +700,19 @@ class DefaultQuadcopterStrategy:
         )
         # includes ALL envs that crossed the plane (passed OR missed)
         crossed_gate_correct_direction = gate_passed | gate_missed
-        
+
+        # Gate reward: +1 for clean pass, -1 for miss — must be before _handle_gate_crossing
+        gate_reward = gate_passed.float() * 1.0 + gate_missed.float() * (-1.0)
+
+        # 1. Dense progress reward
+        progress_current, current_distance, effective_centers = self._calculate_progress_reward(crossed_gate_correct_direction, gate_centers)
+        progress_next_gate = self._calculate_next_gate_progress(gate_passed, gate_centers, next_gate_indices)
+        progress = progress_current + progress_next_gate
+
+        # 2. Advance waypoint index for passed gates
+        self._handle_gate_crossing(gate_passed)
+
+
         # 1. Dense progress reward
         progress_current, current_distance, effective_centers = self._calculate_progress_reward(crossed_gate_correct_direction, gate_centers)
         # only calc reward for flying towards next gate for success gates
@@ -712,11 +724,7 @@ class DefaultQuadcopterStrategy:
         # 2. Sparse reward for target reached: 1 / -1
         # advance waypoint index for passed gates only
         self._handle_gate_crossing(gate_passed)
-        
-        # combined rewards for pass (+1.0) and miss (-1.0)
-        crossing_speed = torch.norm(vel_w, dim=1)  # scalar speed at crossing moment
-        gate_reward = gate_passed.float() * (1.0 + crossing_speed * 0.1) + gate_missed.float() * (-1.0)
-        
+
         #  update tracking for next timestep
         self._update_tracking_variables(gate_passed, current_distance, gate_centers, effective_centers)
 
