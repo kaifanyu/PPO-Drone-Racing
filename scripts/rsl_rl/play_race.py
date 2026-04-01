@@ -85,7 +85,8 @@ def main():
     log_dir = os.path.dirname(resume_path)
 
     if args_cli.follow_robot == -1:
-        env_cfg.viewer.resolution = (1920, 1080)
+        env_cfg.viewer.resolution = (1280, 720)
+        # env_cfg.viewer.resolution = (1920, 1080)
         # env_cfg.viewer.eye = (10.7, 0.4, 7.2)
         # env_cfg.viewer.lookat = (-2.7, 0.5, -0.3)
         env_cfg.viewer.eye    = (8.0, -9.5, 3.2)   # +2.3 back, +3.1 left
@@ -148,21 +149,35 @@ def main():
     if hasattr(obs, "get"):  # Check if it's a TensorDict
         obs = obs["policy"]  # Extract the policy observation
     timestep = 0
+    # Define your control time step (check your task config, often 0.01 or 0.02)
+    # This is (simulation dt * decimation). We will assume 0.02 for this example.
+    control_dt = 0.02 
+    
+    total_steps = 0
+    race_finished = False
+
+    print("[INFO] Starting race timer...")
+
     # simulate environment
-    while simulation_app.is_running():
-        # run everything in inference mode
+    while simulation_app.is_running() and not race_finished:
         with torch.inference_mode():
-            # agent stepping
             actions = policy(obs)
-            # env stepping
             obs, rewards, dones, infos = env.step(actions)
-            # Extract tensor from TensorDict for policy
-            if hasattr(obs, "get"):  # Check if it's a TensorDict
-                obs = obs["policy"]  # Extract the policy observation
-        if args_cli.video:
-            timestep += 1
-            # Exit the play loop after recording one video
-            if timestep == args_cli.video_length:
+            
+            if hasattr(obs, "get"):  
+                obs = obs["policy"]  
+
+            # 1. Add a step to our counter
+            total_steps += 1
+
+            # 2. Check if the environment signals the race is over
+            # dones is a tensor, we check if the first environment (index 0) is done
+            if dones[0].item(): 
+                race_finished = True
+                total_simulated_time = total_steps * control_dt
+                print(f"🏁 Race Finished!")
+                print(f"Total simulated steps: {total_steps}")
+                print(f"Total lap time: {total_simulated_time:.2f} seconds")
                 break
 
     # close the simulator
