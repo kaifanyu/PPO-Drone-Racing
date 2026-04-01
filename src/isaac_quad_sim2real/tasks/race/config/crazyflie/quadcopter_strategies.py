@@ -195,7 +195,7 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["backward_crossing",  "approach_angle"]  # adds extra backwards_crossing key 
+            extra_keys = ["backward_crossing", "speed", "lap_time_bonus"]  # add new keys
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -249,6 +249,7 @@ class DefaultQuadcopterStrategy:
             4: torch.tensor([0.0,  _q,  _q], device=self.device),  # Gate 4 → top-right
             5: torch.tensor([0.0, -_q, -_q], device=self.device),  # Gate 5 → bottom-left
             6: torch.tensor([0.0, -_q,  _q], device=self.device),  # Gate 6 → top-left
+            7: torch.tensor([0.0,  _q,  _q], device=self.device),  # Gate 4 (return) → top-right
         }
 
         # ------------------------------------------------------------------ #
@@ -256,6 +257,8 @@ class DefaultQuadcopterStrategy:
         # ------------------------------------------------------------------ #
         self._virtual_gate_index = 3
         self._virtual_gate_half  = 0.2   # small gate — just big enough to pass through
+        
+        self._lap_start_step = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         
         # Position: north of and above the two touching gates
         # Gate 4 (old idx 3) is at [0.625, 0.0, 0.75] — place virtual gate
@@ -298,7 +301,7 @@ class DefaultQuadcopterStrategy:
         # Initialize reset buffer for curriculum learning
         # Stores 17-dim states: [pos(3), lin_vel(3), quat(4), ang_vel(3), motor_speeds(4)]
         num_gates = len(env._waypoints) if hasattr(env, '_waypoints') else 6
-
+        print(f"[DEBUG] Total waypoints: {self.env._waypoints.shape[0]}")
 
         noise_std = {
             'pos': 0.3,           # Position noise (m)
@@ -655,8 +658,6 @@ class DefaultQuadcopterStrategy:
         Wrong direction penalty: avoid going back through same gate for gate 4
         """
 
-        # Gate setup
-
         # Per-gate half size: use small value for virtual gate
         gate_half_default = getattr(self.env._gate_model_cfg_data, "gate_side", 1.0) * 0.5 \
             if hasattr(self.env, "_gate_model_cfg_data") else 0.5
@@ -713,7 +714,8 @@ class DefaultQuadcopterStrategy:
         self._handle_gate_crossing(gate_passed)
         
         # combined rewards for pass (+1.0) and miss (-1.0)
-        gate_reward = gate_passed.float() * 1.0 + gate_missed.float() * (-1.0)
+        crossing_speed = torch.norm(vel_w, dim=1)  # scalar speed at crossing moment
+        gate_reward = gate_passed.float() * (1.0 + crossing_speed * 0.1) + gate_missed.float() * (-1.0)
         
         #  update tracking for next timestep
         self._update_tracking_variables(gate_passed, current_distance, gate_centers, effective_centers)
@@ -744,51 +746,40 @@ class DefaultQuadcopterStrategy:
         self._prev_pose_drone_wrt_prev_gate = current_pose_prev_gate.clone()
         # store for next timestep
         self._prev_pose_drone_wrt_prev_gate = current_pose_prev_gate.clone()
-        
         if self.cfg.is_train:
-            # Scale each reward 
+            # Scale each reward
             progress_reward = progress * self.env.rew['progress_goal_reward_scale']
             gate_reward_scaled = gate_reward * self.env.rew['target_reached_bonus_reward_scale']
-            
-            # Lap incomplete penalty per-step until 3
+
+            # Lap incomplete penalty per-step until 3 laps
             laps_completed = self.env._n_gates_passed // num_gates
-            lap_penalty = (self.env.rew['lap_incomplete_penalty_reward_scale'] * (laps_completed < 3).float())
-            
-            # penalize aggressive roll and pitch rates for more stability
+            lap_penalty = self.env.rew['lap_incomplete_penalty_reward_scale'] * (laps_completed < 3).float()
+
+            # Stability penalties
             roll_pitch_rates = torch.sum(torch.square(self.env._actions[:, 1:3]), dim=1)
             roll_pitch_rates_penalty = roll_pitch_rates * self.env.rew['roll_pitch_rates_reward_scale'] * self.env.step_dt
-            
-            # penalize aggressive yaw rates
+
             yaw_rate = torch.square(self.env._actions[:, 3])
             yaw_rate_penalty = yaw_rate * self.env.rew['yaw_rate_reward_scale'] * self.env.step_dt
 
-            # wrong direction penalty
+            # Wrong direction penalty
             wrong_direction = (gate_crossed_backward | prev_gate_crossed_backward).float()
             backward_penalty = wrong_direction * self.env.rew.get('wrong_direction_penalty', -200.0)
 
-            # ---- ADD THESE LINES ----
-            # Reward velocity component pointing directly at current gate center.
-            # Clamped to 0 so flying away from a gate is not double-penalized here.
+            # Velocity setup
             vel_w = self.env._robot.data.root_com_lin_vel_w
-            # Replace your current velocity reward block with this
             next_gate_centers = self._get_ideal_gate_centers(next_gate_indices)
 
+            # Loop gate arc logic
             LOOP_GATE_IDX = 4
-            # World-frame via-point: high and NW of gate 4, on the correct approach side
-            # gate_4_center + ~3.5m * gate_4_normal + altitude
             via_point = torch.tensor([0.5, 2.2, 2.8], device=self.device)
-
-            # Determine if drone needs to arc (targeting gate 4 AND on wrong/exit side)
             targeting_loop = (self.env._idx_wp == LOOP_GATE_IDX)
             gate_frame_x = self.env._pose_drone_wrt_gate[:, 0]
-            on_wrong_side = gate_frame_x < 3.0
-            needs_arc = targeting_loop & on_wrong_side
+            needs_arc = targeting_loop & (gate_frame_x < 3.0)
 
-            # Effective target: via-point for arcing envs, gate center otherwise
             effective_target = gate_centers.clone()
             effective_target[needs_arc] = via_point.unsqueeze(0).expand(needs_arc.sum(), -1)
 
-            # Recompute velocity reward using effective target instead of raw gate center
             gate_dir = effective_target - self.env._robot.data.root_link_pos_w
             next_gate_dir = next_gate_centers - self.env._robot.data.root_link_pos_w
 
@@ -798,55 +789,67 @@ class DefaultQuadcopterStrategy:
             gate_dir_unit = gate_dir / gate_dist
             next_gate_dir_unit = next_gate_dir / next_gate_dist
 
-            # For arc envs: 100% toward via-point; for others: 80/20 blend as before
-            blend_w = torch.where(needs_arc.unsqueeze(1), 
-                                torch.ones_like(gate_dir_unit),
-                                0.8 * gate_dir_unit + 0.2 * next_gate_dir_unit)
+            # 100% toward via-point when arcing, 80/20 blend otherwise
+            blend_w = torch.where(
+                needs_arc.unsqueeze(1),
+                torch.ones_like(gate_dir_unit),
+                0.8 * gate_dir_unit + 0.2 * next_gate_dir_unit
+            )
             blended_dir = blend_w / torch.norm(blend_w, dim=1, keepdim=True).clamp(min=0.1)
 
             dist_to_gate_scalar = gate_dist.squeeze(1)
             dist_weight = (1.0 - (dist_to_gate_scalar - 3.0) / 4.0).clamp(min=0.2, max=1.0)
 
-
-            # AFTER — gate 4 requires an arc, straight-line velocity reward fights it
-            # When gate 4 is the target AND drone is far from it, suppress velocity reward entirely
-            gate_4_idx = 4
-            is_gate_4 = (self.env._idx_wp == gate_4_idx)
-            far_from_gate = (dist_to_gate_scalar > 2.0)
-
-            # For gate 4 when far away: drop velocity reward to 0 so the arc isn't punished
-            # For all other gates and close range: use normal velocity reward
+            # Suppress velocity reward for gate 4 arc phase (straight-line reward fights the arc)
             velocity_scale = torch.where(
-                is_gate_4 & far_from_gate,
-                torch.zeros_like(dist_weight),   # fully suppress for gate 4 arc phase
-                dist_weight                       # normal distance-weighted scale otherwise
+                (self.env._idx_wp == LOOP_GATE_IDX) & (dist_to_gate_scalar > 2.0),
+                torch.zeros_like(dist_weight),
+                dist_weight
             )
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
             velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale'] * velocity_scale
 
+            # Raw speed reward — always on, incentivizes going fast regardless of direction
+            speed = torch.norm(vel_w, dim=1)
+            speed_reward = speed * self.env.rew.get('speed_reward_scale', 3.0)
 
-            approach_angle_reward = self._calculate_approach_angle_reward(gate_centers)
-            approach_angle_scaled = approach_angle_reward * self.env.rew.get('approach_angle_reward_scale', 3.0)
+            # Lap time bonus — fires once per completed lap, faster = bigger reward
+            # Uses steps elapsed since lap start, converts to seconds
+            just_completed_lap = (
+                (self.env._n_gates_passed > 0) &
+                (self.env._n_gates_passed % num_gates == 0) &
+                gate_passed   # only on the step the final gate is crossed
+            )
+            steps_elapsed = (self.env.episode_length_buf.float() - self._lap_start_step).clamp(min=1.0)
+            lap_time_s = steps_elapsed * self.env.step_dt
+            # Update lap start for envs that just completed a lap
+            self._lap_start_step = torch.where(just_completed_lap, self.env.episode_length_buf.float(), self._lap_start_step)
+            # Reward: 500 / lap_time — 10s lap = 50, 5s lap = 100, 3s lap = 167
+            lap_time_bonus = just_completed_lap.float() * (500.0 / lap_time_s)
 
-            # Aggregate all components
+            # Aggregate
             rewards = {
-                "progress_goal": progress_reward,
+                "progress_goal":        progress_reward,
                 "target_reached_bonus": gate_reward_scaled,
                 "lap_incomplete_penalty": lap_penalty,
-                "roll_pitch_rates": roll_pitch_rates_penalty,
-                "yaw_rate": yaw_rate_penalty,
-                "backward_crossing": backward_penalty,
-                "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
-                "approach_angle": approach_angle_scaled,   # ADD THIS
+                "roll_pitch_rates":     roll_pitch_rates_penalty,
+                "yaw_rate":             yaw_rate_penalty,
+                "backward_crossing":    backward_penalty,
+                "velocity_toward_gate": velocity_reward,
+                "speed":                speed_reward,
+                "lap_time_bonus":       lap_time_bonus,
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
-            
-            # Track what the agent earned in each component
+
             for key, value in rewards.items():
                 self._episode_sums[key] += value
-            
-            # overrid all rewards when death
-            reward = torch.where(self.env.reset_terminated, torch.ones_like(reward) * self.env.rew['death_cost'],reward)
+
+            # Override all rewards on death
+            reward = torch.where(
+                self.env.reset_terminated,
+                torch.ones_like(reward) * self.env.rew['death_cost'],
+                reward
+            )
         else:
             # eval mode no rewards
             reward = torch.zeros(self.num_envs, device=self.device)
@@ -1163,6 +1166,7 @@ class DefaultQuadcopterStrategy:
             self.env._desired_pos_w[env_ids_tensor, :2] - self.env._robot.data.root_link_pos_w[env_ids_tensor, :2], dim=1
         )
         self.env._n_gates_passed[env_ids_tensor] = 0
+        self._lap_start_step[env_ids_tensor] = self.env.episode_length_buf[env_ids_tensor].float()
 
         # Write state to simulation
         self.env._robot.write_root_link_pose_to_sim(default_root_state[:, :7], env_ids_tensor)
@@ -1187,4 +1191,3 @@ class DefaultQuadcopterStrategy:
         ideal_gate_pos = self._get_ideal_gate_centers(self.env._idx_wp[env_ids_tensor])
         self._prev_distance_to_gate[env_ids_tensor] = torch.norm(drone_pos - ideal_gate_pos, dim=1)
         self.env._crashed[env_ids_tensor] = 0
-        
