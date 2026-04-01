@@ -692,43 +692,7 @@ class DefaultQuadcopterStrategy:
 
         
 
-        # At the top of get_rewards(), add a step counter if you don't have one
-        if not hasattr(self, '_debug_step'):
-            self._debug_step = 0
-        self._debug_step += 1
-        LOG_EVERY = 500  # print every 500 steps
 
-        if self._debug_step % LOG_EVERY == 0:
-            # --- 1. Episode length distribution ---
-            print(f"[REWARD_DEBUG] episode_length | mean={self.env.episode_length_buf.float().mean():.1f} "
-                f"min={self.env.episode_length_buf.min().item():.1f} "
-                f"max={self.env.episode_length_buf.max().item():.1f}")
-
-            # --- 2. How many gates are being passed per episode ---
-            print(f"[REWARD_DEBUG] gates_passed   | mean={self.env._n_gates_passed.float().mean():.2f} "
-                f"max={self.env._n_gates_passed.max().item()}")
-
-            # --- 3. Crash rate ---
-            death_rate = self.env.reset_terminated.float().mean().item()
-            print(f"[REWARD_DEBUG] death_rate     | {death_rate:.3f}  (>0.5 means agent is crashing on purpose)")
-
-            # --- 4. Current speed distribution ---
-            speed = torch.norm(self.env._robot.data.root_com_lin_vel_w, dim=1)
-            print(f"[REWARD_DEBUG] speed (m/s)    | mean={speed.mean():.2f} "
-                f"max={speed.max():.2f} min={speed.min():.2f}")
-
-            # --- 5. Raw reward component magnitudes (BEFORE scaling) ---
-            print(f"[REWARD_DEBUG] progress_raw   | mean={progress.mean():.4f}  "
-                f"(scaled={( progress * self.env.rew['progress_goal_reward_scale']).mean():.2f})")
-            print(f"[REWARD_DEBUG] vel_raw        | mean={vel_toward_gate.mean():.4f}  "
-                f"(scaled={(vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']).mean():.2f})")
-            print(f"[REWARD_DEBUG] lap_penalty    | mean={lap_penalty.mean():.4f}")
-
-            # --- 6. Accumulated reward per component this episode (from episode_sums) ---
-            for key, tensor in self._episode_sums.items():
-                print(f"[REWARD_DEBUG] episodic_sum/{key:30s} | mean={tensor.mean():.1f}")
-
-                
         if self.cfg.is_train:
             # Scale each reward 
             progress_reward = progress * self.env.rew['progress_goal_reward_scale']
@@ -800,6 +764,42 @@ class DefaultQuadcopterStrategy:
             # eval mode no rewards
             reward = torch.zeros(self.num_envs, device=self.device)
         
+        # At the top of get_rewards(), add a step counter if you don't have one
+        if not hasattr(self, '_debug_step'):
+            self._debug_step = 0
+        self._debug_step += 1
+        LOG_EVERY = 500  # print every 500 steps
+
+        if self._debug_step % LOG_EVERY == 0:
+            # --- 1. Episode length distribution ---
+            print(f"[REWARD_DEBUG] episode_length | mean={self.env.episode_length_buf.float().mean():.1f} "
+                f"min={self.env.episode_length_buf.min().item():.1f} "
+                f"max={self.env.episode_length_buf.max().item():.1f}")
+
+            # --- 2. How many gates are being passed per episode ---
+            print(f"[REWARD_DEBUG] gates_passed   | mean={self.env._n_gates_passed.float().mean():.2f} "
+                f"max={self.env._n_gates_passed.max().item()}")
+
+            # --- 3. Crash rate ---
+            death_rate = self.env.reset_terminated.float().mean().item()
+            print(f"[REWARD_DEBUG] death_rate     | {death_rate:.3f}  (>0.5 means agent is crashing on purpose)")
+
+            # --- 4. Current speed distribution ---
+            speed = torch.norm(self.env._robot.data.root_com_lin_vel_w, dim=1)
+            print(f"[REWARD_DEBUG] speed (m/s)    | mean={speed.mean():.2f} "
+                f"max={speed.max():.2f} min={speed.min():.2f}")
+
+            # --- 5. Raw reward component magnitudes (BEFORE scaling) ---
+            print(f"[REWARD_DEBUG] progress_raw   | mean={progress.mean():.4f}  "
+                f"(scaled={( progress * self.env.rew['progress_goal_reward_scale']).mean():.2f})")
+            print(f"[REWARD_DEBUG] vel_raw        | mean={vel_toward_gate.mean():.4f}  "
+                f"(scaled={(vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']).mean():.2f})")
+            print(f"[REWARD_DEBUG] lap_penalty    | mean={lap_penalty.mean():.4f}")
+
+            # --- 6. Accumulated reward per component this episode (from episode_sums) ---
+            for key, tensor in self._episode_sums.items():
+                print(f"[REWARD_DEBUG] episodic_sum/{key:30s} | mean={tensor.mean():.1f}")
+
         return reward
     
 
