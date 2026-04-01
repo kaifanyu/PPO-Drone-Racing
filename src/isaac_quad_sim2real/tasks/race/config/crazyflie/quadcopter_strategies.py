@@ -723,15 +723,25 @@ class DefaultQuadcopterStrategy:
             next_gate_dir_unit = next_gate_dir / next_gate_dist
 
             # 80% toward current gate, 20% toward next — tightens corner anticipation
-            blended_dir = 0.8 * gate_dir_unit + 0.2 * next_gate_dir_unit
+            blended_dir = 0.9 * gate_dir_unit + 0.1 * next_gate_dir_unit
             blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
 
-            vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
+            vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=-1.0)
             velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
 
             crossing_speed = torch.norm(vel_w, dim=1)
             speed_at_crossing_bonus = gate_passed.float() * crossing_speed * self.env.rew['speed_at_crossing_reward_scale']
             # Aggregate all components
+
+            laps_completed = self.env._n_gates_passed // num_gates
+            just_finished_3_laps = (laps_completed >= 3) & (
+                (self.env._n_gates_passed - gate_passed.long()) // num_gates < 3
+            )
+
+            # time_remaining goes from max_episode_length down to 0
+            time_remaining = (self.env.max_episode_length - self.env.episode_length_buf).float()
+            time_bonus = just_finished_3_laps.float() * time_remaining * 2.0   # 2.0 = scale
+
             rewards = {
                 "progress_goal": progress_reward,
                 "target_reached_bonus": gate_reward_scaled,
@@ -740,6 +750,7 @@ class DefaultQuadcopterStrategy:
                 # "yaw_rate": yaw_rate_penalty,
                 "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
                 "speed_at_crossing": speed_at_crossing_bonus,
+                "three_lap_time_bonus": time_bonus,
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             

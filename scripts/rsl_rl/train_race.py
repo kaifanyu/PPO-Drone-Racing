@@ -135,14 +135,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             log_dir += f"_{agent_cfg.run_name}"
         log_dir = os.path.join(log_root_path, log_dir)
 
-    # TODO ----- START ----- Define rewards scales
-    # reward scales - override with CLI arguments
-    progress_goal_reward_scale = 30.0
-    target_reached_bonus_reward_scale = 600.0
-    death_cost = -500.0
-    lap_incomplete_penalty_reward_scale = -0.05
-    roll_pitch_rates_reward_scale = -0.8  # Penalty for aggressive roll/pitch rates
-    yaw_rate_reward_scale = -0.5  # Penalty for aggressive yaw rate
 
     # CLI overrides for reward scaling
     if args_cli.progress_scale is not None:
@@ -159,15 +151,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         yaw_rate_reward_scale = float(args_cli.yaw_rate_scale)
 
     rewards = {
-        'progress_goal_reward_scale': progress_goal_reward_scale,
-        'target_reached_bonus_reward_scale': target_reached_bonus_reward_scale,
-        'death_cost': death_cost,
-        'lap_incomplete_penalty_reward_scale': lap_incomplete_penalty_reward_scale,
-        # 'roll_pitch_rates_reward_scale': roll_pitch_rates_reward_scale,
-        # 'yaw_rate_reward_scale': yaw_rate_reward_scale,
-        # 'wrong_direction_penalty': -500.0,   # hitting a gate from the wrong side
-        'velocity_toward_gate_reward_scale': 15.0,   # <-- ADD THIS
-        'speed_at_crossing_reward_scale':      15.0,  # reward being fast at the gate
+        'progress_goal_reward_scale':                   30.0,
+        'target_reached_bonus_reward_scale':            600.0,
+        'death_cost':                                   -500.0,
+        'lap_incomplete_penalty_reward_scale':          -3.0,
+        'velocity_toward_gate_reward_scale':            15.0,   # <-- ADD THIS
+        'speed_at_crossing_reward_scale':               15.0,  # reward being fast at the gate
     }
 
     env_cfg.is_train = True
