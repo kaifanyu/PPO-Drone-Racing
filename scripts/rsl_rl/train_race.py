@@ -166,6 +166,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'velocity_toward_gate_reward_scale':        6.0,   # <-- ADD THIS
         'speed_reward_scale':                       0.3,   # NEW
         'gate_crossing_speed_scale':                5.0,    # NEW — sparse speed bonus at gate crossing
+        'flip_alignment_scale': 4.0,
     }
     # TODO ----- END -----
 
