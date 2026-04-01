@@ -185,22 +185,21 @@ class DefaultQuadcopterStrategy:
 
 
 
-
         virtual_wp = torch.tensor(
-            [[0.625, 2.8, 2.2, 0.0, 0.0, 1.5708]],   # x aligned w/ gate4, y=2.8 north, z=2.2 elevated
+            [[0.625, 2.8, 2.2, 0.0, 0.0, -1.5708]],   # yaw flipped: drone crosses south→north
             dtype=torch.float32, device=self.device
         )
 
-        # Quaternion: same yaw as surrounding gates (π/2)
         virtual_quat = quat_from_euler_xyz(
             torch.zeros(1, device=self.device),
             torch.zeros(1, device=self.device),
-            torch.tensor([1.5708], device=self.device)
-        )   # shape [1, 4]
+            torch.tensor([-1.5708], device=self.device)  # -π/2
+        )
 
-        # Normal points +Y (drone approaches virtual gate from the north)
-        virtual_normal = torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32, device=self.device)
-
+        virtual_normal = torch.tensor(
+            [[0.0, -1.0, 0.0]],   # flipped: points south
+            dtype=torch.float32, device=self.device
+        )
         # Insert at index 3, shifting the old gate 4 (and beyond) to index 4+
         env._waypoints = torch.cat([env._waypoints[:3], virtual_wp, env._waypoints[3:]], dim=0)
         env._waypoints_quat = torch.cat([env._waypoints_quat[:3], virtual_quat, env._waypoints_quat[3:]], dim=0)
@@ -265,19 +264,21 @@ class DefaultQuadcopterStrategy:
         # Drone is north of the virtual gate, heading south and descending.
         VIRTUAL_GATE_ID = 3
         for seed_pos, seed_vel in [
-            (torch.tensor([0.625, 3.5, 2.8], device=self.device),
-            torch.tensor([0.0, -3.0, -0.8], device=self.device)),
-            (torch.tensor([0.625, 2.5, 2.4], device=self.device),
-            torch.tensor([0.0, -4.5, -0.4], device=self.device)),
+            # Drone is south of virtual gate, heading north fast
+            (torch.tensor([0.625, 1.2, 2.3], device=self.device),
+            torch.tensor([0.0,  4.5, 0.3], device=self.device)),
+            # Drone is just south, higher speed arc
+            (torch.tensor([0.625, 0.5, 2.0], device=self.device),
+            torch.tensor([0.0,  5.0, 0.5], device=self.device)),
         ]:
             self._reset_buffer.store(
                 gate_id=VIRTUAL_GATE_ID,
                 pos=seed_pos,
                 lin_vel=seed_vel,
-                quat=quat_from_euler_xyz(          # yaw=π (heading south)
+                quat=quat_from_euler_xyz(          # yaw=0: heading north (+Y)
                     torch.zeros(1, device=self.device),
                     torch.zeros(1, device=self.device),
-                    torch.tensor([3.1416], device=self.device)
+                    torch.tensor([0.0], device=self.device)
                 )[0],
                 ang_vel=torch.zeros(3, device=self.device),
                 motor_speeds=torch.zeros(4, device=self.device) + 500.0
