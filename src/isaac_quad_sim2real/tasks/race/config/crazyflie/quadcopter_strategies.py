@@ -68,19 +68,38 @@ class ResetBuffer:
         ang_vel: torch.Tensor,
         motor_speeds: torch.Tensor
     ):
-        """ Store a state in the buffer for a specific gate."""
-        write_idx = self._indices[gate_id].item()
-        
+        """Store a state, keeping only the fastest crossings (top-k by speed).
+
+        While the buffer has empty slots, fill greedily. Once full, only
+        replace the slowest stored entry if the new crossing is faster.
+        This biases resets toward high-speed states the policy has achieved.
+        """
+        speed = torch.norm(lin_vel).item()
+        count = self._counts[gate_id].item()
+
+        if count < self.buffer_size:
+            # Buffer not full yet — just append
+            write_idx = self._indices[gate_id].item()
+        else:
+            # Buffer full — find the slowest stored entry
+            stored_speeds = torch.norm(
+                self._buffer[gate_id, :, 3:6], dim=1
+            )  # [buffer_size]
+            min_speed, write_idx_tensor = stored_speeds.min(dim=0)
+            if speed <= min_speed.item():
+                return  # New crossing is slower than worst stored — skip
+            write_idx = write_idx_tensor.item()
+
         self._buffer[gate_id, write_idx, 0:3] = pos
         self._buffer[gate_id, write_idx, 3:6] = lin_vel
         self._buffer[gate_id, write_idx, 6:10] = quat
         self._buffer[gate_id, write_idx, 10:13] = ang_vel
         self._buffer[gate_id, write_idx, 13:17] = motor_speeds
-        
-        # Update circular buffer index
-        self._indices[gate_id] = (write_idx + 1) % self.buffer_size
-        # Update count (saturate at buffer size)
-        self._counts[gate_id] = min(self._counts[gate_id] + 1, self.buffer_size)
+
+        if count < self.buffer_size:
+            # Only advance circular index while filling
+            self._indices[gate_id] = (write_idx + 1) % self.buffer_size
+            self._counts[gate_id] = count + 1
     
     def get_count(self, gate_id: int) -> int:
         """Get the number of stored states for a gate."""
@@ -177,35 +196,11 @@ class DefaultQuadcopterStrategy:
             ]
 
             extra_keys = ["speed_at_crossing"]  # adds extra backwards_crossing key 
-
+            
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
                 for key in keys + extra_keys
             }
-
-
-
-        virtual_wp = torch.tensor(
-            [[0.625, 2.8, 2.2, 0.0, 0.0, -1.5708]],   # yaw flipped: drone crosses south→north
-            dtype=torch.float32, device=self.device
-        )
-
-        virtual_quat = quat_from_euler_xyz(
-            torch.zeros(1, device=self.device),
-            torch.zeros(1, device=self.device),
-            torch.tensor([-1.5708], device=self.device)  # -π/2
-        )
-
-        virtual_normal = torch.tensor(
-            [[0.0, -1.0, 0.0]],   # flipped: points south
-            dtype=torch.float32, device=self.device
-        )
-        # Insert at index 3, shifting the old gate 4 (and beyond) to index 4+
-        env._waypoints = torch.cat([env._waypoints[:3], virtual_wp, env._waypoints[3:]], dim=0)
-        env._waypoints_quat = torch.cat([env._waypoints_quat[:3], virtual_quat, env._waypoints_quat[3:]], dim=0)
-        env._normal_vectors = torch.cat([env._normal_vectors[:3], virtual_normal, env._normal_vectors[3:]], dim=0)
-
-
 
         # Ranges for evaluation with given min / max to mimic the sim2real gap
         self._twr_range = (0.95, 1.05)
@@ -243,9 +238,55 @@ class DefaultQuadcopterStrategy:
         self._prev_pose_drone_wrt_prev_gate = torch.zeros(self.num_envs, 3, device=self.device)
 
 
+        # ------------------------------------------------------------------ #
+        # INSERT VIRTUAL WAYPOINT at index 3 (between old gate 3 and gate 4) #
+        # ------------------------------------------------------------------ #
+        self._virtual_gate_index = 3
+        self._virtual_gate_half  = 0.2   # small gate — just big enough to pass through
+        
+        # Position: north of and above the two touching gates
+        # Gate 4 (old idx 3) is at [0.625, 0.0, 0.75] — place virtual gate
+        # 1.8m north and 1.8m above so the center is reachable mid-arc
+
+        # NEW — directly above gate 4, south-facing so drone passes through going south
+        virtual_wp = torch.tensor(
+            [[0.625, 0.0, 1.5,  0.0, 0.0, -1.5708]],  # same X,Y as gate 4, just higher Z
+            device=self.device
+        )
+        virtual_quat = quat_from_euler_xyz(
+            torch.zeros(1, device=self.device),
+            torch.zeros(1, device=self.device),
+            torch.tensor([-np.pi / 2], device=self.device)   # yaw = -π/2 → normal = -Y (south)
+        )
+        virtual_normal = torch.tensor([[0.0, -1.0, 0.0]], device=self.device)  # -Y = south
+
+        # Normal vector for yaw=π/2 is +Y
+        # virtual_normal = torch.tensor([[0.0, 1.0, 0.0]], device=self.device)
+
+        # Patch all waypoint arrays by inserting at index 3
+        env._waypoints = torch.cat([
+            env._waypoints[:3],
+            virtual_wp,
+            env._waypoints[3:]
+        ], dim=0)
+
+        env._waypoints_quat = torch.cat([
+            env._waypoints_quat[:3],
+            virtual_quat,
+            env._waypoints_quat[3:]
+        ], dim=0)
+
+        env._normal_vectors = torch.cat([
+            env._normal_vectors[:3],
+            virtual_normal,
+            env._normal_vectors[3:]
+        ], dim=0)
+
         # Initialize reset buffer for curriculum learning
         # Stores 17-dim states: [pos(3), lin_vel(3), quat(4), ang_vel(3), motor_speeds(4)]
         num_gates = len(env._waypoints) if hasattr(env, '_waypoints') else 6
+
+
         noise_std = {
             'pos': 0.3,           # Position noise (m)
             'lin_vel': 0.3,       # Linear velocity noise (m/s)
@@ -259,99 +300,65 @@ class DefaultQuadcopterStrategy:
             device=self.device,
             noise_std=noise_std
         )
-
-        # Seed virtual gate (index 3) with a couple of representative mid-arc states.
-        # Drone is north of the virtual gate, heading south and descending.
+        # Seed the VIRTUAL gate (index 3), not the loop gate
         VIRTUAL_GATE_ID = 3
-        for seed_pos, seed_vel in [
-            # Drone is south of virtual gate, heading north fast
-            (torch.tensor([0.625, 1.2, 2.3], device=self.device),
-            torch.tensor([0.0,  4.5, 0.3], device=self.device)),
-            # Drone is just south, higher speed arc
-            (torch.tensor([0.625, 0.5, 2.0], device=self.device),
-            torch.tensor([0.0,  5.0, 0.5], device=self.device)),
-        ]:
-            self._reset_buffer.store(
-                gate_id=VIRTUAL_GATE_ID,
-                pos=seed_pos,
-                lin_vel=seed_vel,
-                quat=quat_from_euler_xyz(          # yaw=0: heading north (+Y)
-                    torch.zeros(1, device=self.device),
-                    torch.zeros(1, device=self.device),
-                    torch.tensor([0.0], device=self.device)
-                )[0],
-                ang_vel=torch.zeros(3, device=self.device),
-                motor_speeds=torch.zeros(4, device=self.device) + 500.0
+
+        # These states represent the drone mid-arc: 
+        # elevated, north of gate stack, heading south
+        up_pos = torch.tensor(
+            [0.625, 2.8, 2.4],           # north of virtual gate, approaching from behind
+            dtype=torch.float32, device=self.device
+        )
+        up_vel = torch.tensor(
+            [0.0, -3.5, -0.3],           # heading south toward virtual gate
+            dtype=torch.float32, device=self.device
+        )
+        self._seed_loop_buffer(VIRTUAL_GATE_ID, up_pos, up_vel)
+
+        via_pos = torch.tensor(
+            [0.625, 3.5, 2.8],           # further north, higher up — earlier in arc
+            dtype=torch.float32, device=self.device
+        )
+        approach_vel = torch.tensor(
+            [0.0, -2.0, -1.0],           # heading south and descending
+            dtype=torch.float32, device=self.device
+        )
+        self._seed_loop_buffer(VIRTUAL_GATE_ID, via_pos, approach_vel)
+
+        LOOP_GATE_ID = 4  # gate 4 counting from 1, at [0.625, 0.0, 0.75]
+
+        # Phase 1: drone has swung north, elevated, beginning descent toward gate 4
+        # Drone is north of virtual gate, heading south and slightly down
+        up_pos = torch.tensor(
+            [0.625, 2.5, 2.6],    # north of virtual gate
+            dtype=torch.float32, device=self.device
+        )
+        up_vel = torch.tensor(
+            [0.0, -4.0, -0.5],    # heading south toward virtual gate
+            dtype=torch.float32, device=self.device
+        )
+
+        via_pos = torch.tensor(
+            [0.625, 3.5, 3.0],    # further north, higher — earlier in arc
+            dtype=torch.float32, device=self.device
+        )
+        approach_vel = torch.tensor(
+            [0.0, -3.0, -1.0],    # heading south and descending
+            dtype=torch.float32, device=self.device
+        )
+        self._seed_loop_buffer(LOOP_GATE_ID, up_pos, up_vel)
+        self._seed_loop_buffer(LOOP_GATE_ID, via_pos, approach_vel)
+
+        # Fix the debug check too
+        gate_4_pos  = self.env._waypoints[LOOP_GATE_ID, :3]   # reads index 4 = real loop gate
+        gate_4_quat = self.env._waypoints_quat[LOOP_GATE_ID, :]
+        for label, p in [("Up-phase ", up_pos), ("Via-point", via_pos)]:
+            p_in_frame, _ = subtract_frame_transforms(
+                gate_4_pos.unsqueeze(0), gate_4_quat.unsqueeze(0), p.unsqueeze(0)
             )
+            print(f"[DEBUG] {label} gate_frame_X = {p_in_frame[0,0]:.3f}  (must be > 0)")
+        print(f"[INFO]  Gate {LOOP_GATE_ID} buffer seeded with {self._reset_buffer.get_count(LOOP_GATE_ID)} states")
 
-
-        GATE_LABELS = {
-            0: "Gate 0 (real)",
-            1: "Gate 1 (real)",
-            2: "Gate 2 (real)",
-            3: "Gate 3 (real)",
-            4: "Gate 4 (real)",
-            5: "Gate 5 (real)",
-            6: "Gate 6 (real)",
-            7: "Gate 7 (real)",
-        }
-        VIRTUAL_INDICES = {3}  # mark virtual gates clearly
-
-        n = self.env._waypoints.shape[0]
-        print("\n" + "=" * 70)
-        print(f"  WAYPOINT DEBUG  ({n} total gates)")
-        print("=" * 70)
-
-        for i in range(n):
-            label = "VIRTUAL" if i in VIRTUAL_INDICES else f"Gate {i}"
-            wp   = self.env._waypoints[i]         # [x, y, z, roll, pitch, yaw]
-            quat = self.env._waypoints_quat[i]    # [qw, qx, qy, qz]
-            norm = self.env._normal_vectors[i]    # [nx, ny, nz]
-            buf_count = self._reset_buffer.get_count(i)
-
-            print(f"\n  [{i}] {label}")
-            print(f"       pos  : x={wp[0]:.4f}  y={wp[1]:.4f}  z={wp[2]:.4f}")
-            print(f"       rpy  : r={wp[3]:.4f}  p={wp[4]:.4f}  yaw={wp[5]:.4f} rad  ({wp[5]*180/3.14159:.1f} deg)")
-            print(f"       quat : w={quat[0]:.4f}  x={quat[1]:.4f}  y={quat[2]:.4f}  z={quat[3]:.4f}")
-            print(f"       normal: [{norm[0]:.3f}, {norm[1]:.3f}, {norm[2]:.3f}]")
-            print(f"       buffer: {buf_count} seed states")
-
-            # For every seeded state, transform into this gate's frame and check X > 0
-            if buf_count > 0:
-                print(f"       -- Seed state gate-frame X values (must all be > 0) --")
-                for s in range(buf_count):
-                    state = self._reset_buffer._buffer[i, s]
-                    seed_pos = state[0:3].unsqueeze(0)
-                    gate_pos = wp[:3].unsqueeze(0)
-                    gate_q   = quat.unsqueeze(0)
-                    p_in_frame, _ = subtract_frame_transforms(gate_pos, gate_q, seed_pos)
-                    x_val = p_in_frame[0, 0].item()
-                    status = "✓" if x_val > 0.0 else "✗ WRONG SIDE"
-                    print(f"           seed {s}: world=({state[0]:.2f}, {state[1]:.2f}, {state[2]:.2f})  "
-                        f"gate_frame_X={x_val:.3f}  {status}")
-
-        # Validate sequential gate ordering makes geometric sense
-        print("\n" + "-" * 70)
-        print("  SEQUENTIAL GATE CHECKS (each gate's center in next gate's frame)")
-        print("-" * 70)
-        for i in range(n):
-            next_i = (i + 1) % n
-            gate_pos  = self.env._waypoints[i, :3].unsqueeze(0)
-            next_pos  = self.env._waypoints[next_i, :3].unsqueeze(0)
-            next_quat = self.env._waypoints_quat[next_i].unsqueeze(0)
-
-            # Where is gate i, expressed in gate (i+1)'s local frame?
-            g_in_next, _ = subtract_frame_transforms(next_pos, next_quat, gate_pos)
-            x = g_in_next[0, 0].item()
-            y = g_in_next[0, 1].item()
-            z = g_in_next[0, 2].item()
-
-            # Drone approaches next gate from +X side, so previous gate should be at X > 0
-            approach_ok = "✓ drone approaches from correct side" if x > 0 else "✗ CHECK APPROACH DIRECTION"
-            print(f"  Gate {i:2d} → Gate {next_i:2d}: gate{i} in gate{next_i}_frame = "
-                f"({x:+.2f}, {y:+.2f}, {z:+.2f})  {approach_ok}")
-
-        print("=" * 70 + "\n")
 
     def _randomize_dynamics(self, env_ids: torch.Tensor):
         """Randomize dynamics parameters for specified environments.
@@ -393,84 +400,127 @@ class DefaultQuadcopterStrategy:
         # Motor time constants: use fixed base value (no randomization)
         self.env._tau_m[env_ids] = self.env._tau_m_value
 
-    def _detect_gate_crossing(
-        self,
-        current_gate_position: torch.Tensor,
-        prev_gate_position: torch.Tensor,
-        expanded_half: float,
-        gate_half: float,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _seed_loop_buffer(self, loop_gate_id: int, via_pos: torch.Tensor, approach_vel: torch.Tensor):
         """
-        Gate local frame: 
-        X: normal axis (approach / exit direction)
-        Y: horizontal axis (left / right)
-        Z: vertical axis (up / down)
-        
-        To detect a gate crossing, we need it to 
-        1. Go through the correct X direction
-        2. Make drone pass thorugh the center, ideally middle of Y and middle of Z
+        Manually inject states into the reset buffer for a gate that requires a
+        non-obvious trajectory (e.g. looping above gate 4).  Call once from __init__.
+
+        Args:
+            loop_gate_id:  the gate index whose buffer we seed (e.g. 3 = gate before the loop)
+            via_pos:       world-frame position drone should be at when it enters the loop (tensor [3])
+            approach_vel:  velocity vector pointing along the correct approach arc (tensor [3])
         """
+        yaw = torch.atan2(approach_vel[1], approach_vel[0])
+        quat = quat_from_euler_xyz(
+            torch.zeros(1, device=self.device),
+            torch.zeros(1, device=self.device),
+            yaw.unsqueeze(0)
+        )[0]
 
-        # drone's position expressed in gate's local frame at 2 timesteps
-        prev_drone_position = prev_gate_position[:, 0]
-        current_drone_position_X = current_gate_position[:, 0]
-        current_drone_position_Y = current_gate_position[:, 1]
-        current_drone_position_Z = current_gate_position[:, 2]
+        # Store several slightly noisy copies so the buffer isn't a single point
+        for _ in range(20):
+            noise_pos = via_pos + torch.randn(3, device=self.device) * 0.3
+            noise_vel = approach_vel + torch.randn(3, device=self.device) * 0.5
+            noise_vel[2] = approach_vel[2] + torch.randn(1, device=self.device).item() * 0.3
 
-        # cross the gate going forward (+x -> x <= 0)
-        crossed_gate_correct_direction = (prev_drone_position > 0.0) & (current_drone_position_X <= 0.0)
-        
-        # check if drone fit through gate
-        crossed_inside_gate = (
-            (torch.abs(current_drone_position_Y) <= gate_half) &
-            (torch.abs(current_drone_position_Z) <= gate_half)
-        )
-        
-        # 3) Allow an expanded detection window for misses, if provided
-        crossed_inside_expanded_gate = (
-            (torch.abs(current_drone_position_Y) <= expanded_half) &
-            (torch.abs(current_drone_position_Z) <= expanded_half)
-        )
+            self._reset_buffer.store(
+                gate_id=loop_gate_id,
+                pos=noise_pos,
+                lin_vel=noise_vel,
+                quat=quat,
+                ang_vel=torch.zeros(3, device=self.device),
+                motor_speeds=torch.ones(4, device=self.device)
+            )
 
-        # 3 possible ways for gate crossing: passed correctly, missed gate, passed backwards
-        gate_passed = crossed_gate_correct_direction & crossed_inside_gate
-        gate_missed = crossed_gate_correct_direction & crossed_inside_expanded_gate & (~crossed_inside_gate)
-        crossed_gate_backward = ((prev_drone_position < 0.0) & (current_drone_position_X >= 0.0) & crossed_inside_expanded_gate)
+    def _detect_gate_crossing(self, current_gate_position, prev_gate_position,
+                            expanded_half, gate_half):
+        # expanded_half and gate_half are now [num_envs] tensors, not scalars
+        prev_x   = prev_gate_position[:, 0]
+        curr_x   = current_gate_position[:, 0]
+        curr_y   = current_gate_position[:, 1]
+        curr_z   = current_gate_position[:, 2]
+
+        crossed_forward  = (prev_x > 0.0) & (curr_x <= 0.0)
+        inside_gate      = (curr_y.abs() <= gate_half)     & (curr_z.abs() <= gate_half)
+        inside_expanded  = (curr_y.abs() <= expanded_half) & (curr_z.abs() <= expanded_half)
+
+        gate_passed           = crossed_forward & inside_gate
+        gate_missed           = crossed_forward & inside_expanded & (~inside_gate)
+        crossed_gate_backward = (prev_x < 0.0) & (curr_x >= 0.0) & inside_expanded
 
         return gate_passed, gate_missed, crossed_gate_backward
-    
+
+
+    def _calculate_approach_angle_reward(
+        self,
+        gate_centers: torch.Tensor,
+    ) -> torch.Tensor:
+        drone_pos = self.env._robot.data.root_link_pos_w
+        vel_w = self.env._robot.data.root_com_lin_vel_w
+
+        dist_to_gate = torch.norm(drone_pos - gate_centers, dim=1)
+        gate_normals = self.env._normal_vectors[self.env._idx_wp]
+
+        vel_mag = torch.norm(vel_w, dim=1, keepdim=True).clamp(min=0.1)
+        vel_unit = vel_w / vel_mag
+
+        alignment = (vel_unit * gate_normals).sum(dim=1)
+
+        # --- CHANGED: 2.0 m radius (was 3.0), no proximity weight ---
+        approach_radius = 2.0
+        in_range = (dist_to_gate < approach_radius).float()
+        approach_reward = alignment.clamp(min=0.0) * in_range
+
+        return approach_reward
+
     def _calculate_progress_reward(
         self,
         crossed_gate_correct_direction: torch.Tensor,
         gate_centers: torch.Tensor,
     ) -> torch.Tensor:
-        """Dense reward signal at every timestep based on how much closer drone got to current gate compared to last"""
-        
-        # stored distrance from last timestep
-        prev_distance = self._prev_distance_to_gate.clone()
+        LOOP_GATE_IDX = 4
+        via_point = torch.tensor([0.5, 2.2, 2.8], device=self.device)
 
-        current_pos = self.env._robot.data.root_link_pos_w
+        drone_pos = self.env._robot.data.root_link_pos_w
+        gate_frame_x = self.env._pose_drone_wrt_gate[:, 0]
 
-        successful_crossed = torch.where(crossed_gate_correct_direction)[0]     # id's for success / fail gate crossings
+        targeting_loop = (self.env._idx_wp == LOOP_GATE_IDX)
+        needs_arc = targeting_loop & (gate_frame_x < 3.0)
+
+        # Effective gate center for distance computation
+        effective_centers = gate_centers.clone()
+        effective_centers[needs_arc] = via_point.unsqueeze(0).expand(needs_arc.sum(), -1)
+
+        curr_3d_dist = torch.norm(drone_pos - effective_centers, dim=1)
+        euclidean_progress = self._prev_distance_to_gate - curr_3d_dist
+
+        prev_x = self._prev_pose_drone_wrt_gate[:, 0].clone()
+        current_x = self.env._pose_drone_wrt_gate[:, 0]
+
+
+        successful_crossed = torch.where(crossed_gate_correct_direction)[0]
         not_successful_crossed = torch.where(~crossed_gate_correct_direction)[0]
-        
+
         current_distance = torch.zeros(self.num_envs, device=self.device)
-        
-        # for successful cross: progress = distance from prev_pos to gate plane
+
         if successful_crossed.numel() > 0:
-            # X coords of pose that succeeded
-            prev_distance[successful_crossed] = self._prev_pose_drone_wrt_gate[successful_crossed][:, 0]
+            prev_x[successful_crossed] = self._prev_pose_drone_wrt_gate[successful_crossed, 0]
             current_distance[successful_crossed] = 0.0
 
-        # for failed cross: progress = euclidean distance to current gate center
         if not_successful_crossed.numel() > 0:
-            current_gate_pos = gate_centers[not_successful_crossed]
-            current_distance[not_successful_crossed] = torch.norm(current_pos[not_successful_crossed] - current_gate_pos, dim=1)
-        
-        # positive progress is made when curr < prev
-        progress = prev_distance - current_distance
-        return progress, current_distance
+            current_distance[not_successful_crossed] = current_x[not_successful_crossed].clamp(min=0.0)
 
+        # Original X-axis progress (precise, but penalises looping above/around)
+        prev_x_clamped = prev_x.clamp(min=0.0)
+        x_progress = prev_x_clamped - current_distance
+
+        # SWITCH: only use X-axis progress when drone is close AND in front of gate.
+        # When far away (> 3 m), fall back to 3D euclidean so upward/sideways arcs
+        # are NOT penalised — this is what allows the loop above gate 4 to be discovered.
+        use_x_progress = (curr_3d_dist < 3.0) & (gate_frame_x > 0.0) & (~needs_arc)
+        progress = torch.where(use_x_progress, x_progress, euclidean_progress)
+
+        return progress, current_distance, effective_centers  # <-- add this
 
     def _calculate_next_gate_progress(
         self,
@@ -550,21 +600,20 @@ class DefaultQuadcopterStrategy:
             self._prev_pose_drone_wrt_gate[ids_to_next_gate] = new_pose_drone_wrt_gate
             self.env._prev_x_drone_wrt_gate[ids_to_next_gate] = new_pose_drone_wrt_gate[:, 0]
 
-
-    def _update_tracking_variables(
-        self,
-        gate_passed: torch.Tensor,
-        current_distance: torch.Tensor,
-    ) -> None:
-        """Update previous pose and distance for next timestep."""
-        # Update envs that did not successfully pass the gate
+    def _update_tracking_variables(self, gate_passed, current_distance, gate_centers, effective_centers):
         ids_not_passed = torch.where(~gate_passed)[0]
         if ids_not_passed.numel() > 0:
-            self._prev_pose_drone_wrt_gate[ids_not_passed] = (self.env._pose_drone_wrt_gate[ids_not_passed].clone())
-            self.env._prev_x_drone_wrt_gate[ids_not_passed] = (self.env._pose_drone_wrt_gate[ids_not_passed, 0])
-            self._prev_distance_to_gate[ids_not_passed] = current_distance[ids_not_passed].clone()
-
-
+            self._prev_pose_drone_wrt_gate[ids_not_passed] = (
+                self.env._pose_drone_wrt_gate[ids_not_passed].clone()
+            )
+            self.env._prev_x_drone_wrt_gate[ids_not_passed] = (
+                self.env._pose_drone_wrt_gate[ids_not_passed, 0]
+            )
+            drone_pos = self.env._robot.data.root_link_pos_w[ids_not_passed]
+            # Use effective_centers so prev/curr distances are always measured to the same target
+            self._prev_distance_to_gate[ids_not_passed] = torch.norm(
+                drone_pos - effective_centers[ids_not_passed], dim=1
+            )
     def get_rewards(self) -> torch.Tensor:
         """
         Dense reward for progress goal: distance reduction to current gate center (going towards the next gate)
@@ -706,6 +755,7 @@ class DefaultQuadcopterStrategy:
             reward = torch.zeros(self.num_envs, device=self.device)
         
         return reward
+    
 
     def get_observations(self) -> Dict[str, torch.Tensor]:
         """Get observations including waypoint positions and drone state."""
@@ -805,9 +855,19 @@ class DefaultQuadcopterStrategy:
             model_prim_names_in_env = [f"{self.env.target_models_prim_base_name}_{i}" for i in range(num_models_per_env)]
 
             self.env._all_target_models_paths = []
-            for env_path in self.env.scene.env_prim_paths:
-                paths_for_this_env = [f"{env_path}/{name}" for name in model_prim_names_in_env]
-                self.env._all_target_models_paths.append(paths_for_this_env)
+
+            if not self.env._models_paths_initialized:
+                num_models_per_env = self.env._waypoints.size(0)
+                model_prim_names_in_env = [
+                    f"{self.env.target_models_prim_base_name}_{i}"
+                    for i in range(num_models_per_env)
+                ]
+                self.env._all_target_models_paths = []
+                for env_path in self.env.scene.env_prim_paths:
+                    paths_for_this_env = [f"{env_path}/{name}" for name in model_prim_names_in_env]
+                    self.env._all_target_models_paths.append(paths_for_this_env)
+
+                self.env._models_paths_initialized = True
 
             self.env._models_paths_initialized = True
 
