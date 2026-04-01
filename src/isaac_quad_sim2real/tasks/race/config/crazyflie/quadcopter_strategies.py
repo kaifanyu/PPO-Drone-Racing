@@ -573,7 +573,7 @@ class DefaultQuadcopterStrategy:
         prev_gate_centers = current_gate_centers[successful_crossed]
 
         # get next gate
-        next_gate_pos = self.env._waypoints[next_gate_indices[successful_crossed], :3]
+        next_gate_pos = self._get_ideal_gate_centers(next_gate_indices[successful_crossed])
         next_gate_quat = self.env._waypoints_quat[next_gate_indices[successful_crossed], :]
 
         # subtract to find difference between
@@ -771,7 +771,7 @@ class DefaultQuadcopterStrategy:
             # Clamped to 0 so flying away from a gate is not double-penalized here.
             vel_w = self.env._robot.data.root_com_lin_vel_w
             # Replace your current velocity reward block with this
-            next_gate_centers = self.env._waypoints[next_gate_indices, :3]
+            next_gate_centers = self._get_ideal_gate_centers(next_gate_indices)
 
             LOOP_GATE_IDX = 4
             # World-frame via-point: high and NW of gate 4, on the correct approach side
@@ -1183,8 +1183,8 @@ class DefaultQuadcopterStrategy:
         self.env._prev_x_drone_wrt_gate[env_ids_tensor] = self.env._pose_drone_wrt_gate[env_ids_tensor, 0]
         # Initialize previous distance to gate center
         drone_pos = self.env._robot.data.root_link_pos_w[env_ids_tensor]
-        gate_pos = self.env._waypoints[self.env._idx_wp[env_ids_tensor], :3]
-        self._prev_distance_to_gate[env_ids_tensor] = torch.norm(drone_pos - gate_pos, dim=1)
-
+        
+        ideal_gate_pos = self._get_ideal_gate_centers(self.env._idx_wp[env_ids_tensor])
+        self._prev_distance_to_gate[env_ids_tensor] = torch.norm(drone_pos - ideal_gate_pos, dim=1)
         self.env._crashed[env_ids_tensor] = 0
         
