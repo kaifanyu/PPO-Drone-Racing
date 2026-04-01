@@ -151,12 +151,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         yaw_rate_reward_scale = float(args_cli.yaw_rate_scale)
 
     rewards = {
-        'progress_goal_reward_scale':               20.0,   # DOWN from 30 — less reward for "inching forward"
-        'target_reached_bonus_reward_scale':        600.0,  # keep same
-        'death_cost':                               -600.0, # UP slightly — crashing at high speed is costlier
-        'lap_incomplete_penalty_reward_scale':      -8.0,   # UP from -3 — biggest lever for speed (see below)
-        'velocity_toward_gate_reward_scale':        28.0,   # UP from 15
-        'speed_at_crossing_reward_scale':           60.0,   # UP from 15 — most direct speed signal
+        'progress_goal_reward_scale':               30.0,   # restore original
+        'target_reached_bonus_reward_scale':        600.0,  # same
+        'death_cost':                               -500.0, # restore original
+        'lap_incomplete_penalty_reward_scale':      -1.0,   # restore original
+        'velocity_toward_gate_reward_scale':        15.0,   # restore original
+        'speed_at_crossing_reward_scale':           25.0,   # only change: 15 → 40
     }
 
     env_cfg.is_train = True
