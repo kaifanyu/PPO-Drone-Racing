@@ -281,6 +281,9 @@ class DefaultQuadcopterStrategy:
             device=self.device,
             noise_std=noise_std
         )
+        self._lap_start_time = torch.zeros(self.num_envs, device=self.device)
+        self._time_since_last_gate = torch.zeros(self.num_envs, device=self.device)
+
         # Seed the VIRTUAL gate (index 3), not the loop gate
         VIRTUAL_GATE_ID = 3
 
@@ -765,6 +768,41 @@ class DefaultQuadcopterStrategy:
             )
             speed_reward = speed * self.env.rew['speed_reward_scale'] * speed_scale
 
+            # Bonus proportional to speed at moment of gate crossing
+            crossing_speed = torch.norm(vel_w, dim=1)
+            speed_at_crossing_bonus = gate_passed.float() * crossing_speed * self.env.rew['speed_at_crossing_reward_scale']
+
+            # Detect lap completion (n_gates_passed just crossed a multiple of num_gates)
+            prev_laps = (self.env._n_gates_passed - gate_passed.long()) // num_gates
+            curr_laps = self.env._n_gates_passed // num_gates
+            just_completed_lap = (curr_laps > prev_laps)
+
+            # Lap time in seconds
+            current_time = self.env.episode_length_buf * self.env.step_dt
+            lap_time = (current_time - self._lap_start_time).clamp(min=1.0)  # clamp avoids div/0
+
+            # Inverse lap time reward — faster lap = bigger bonus
+            # e.g. 5s lap → 1/5 * scale, 10s lap → 1/10 * scale
+            lap_time_bonus = just_completed_lap.float() * (1.0 / lap_time) * self.env.rew['lap_time_reward_scale']
+
+            # Reset lap timer on completion
+            self._lap_start_time = torch.where(just_completed_lap, current_time, self._lap_start_time)
+
+            # Increment time since last gate crossing
+            self._time_since_last_gate += self.env.step_dt
+
+            # Per-step penalty proportional to time already spent on this gate segment
+            # Grows larger the longer the drone takes — creates urgency that compounds over time
+            segment_time_penalty = self._time_since_last_gate * self.env.rew['segment_time_penalty_scale']
+
+            # Reset counter for envs that just passed a gate
+            self._time_since_last_gate = torch.where(
+                gate_passed,
+                torch.zeros_like(self._time_since_last_gate),
+                self._time_since_last_gate
+            )
+
+
             # Aggregate all components
             rewards = {
                 "progress_goal": progress_reward,
@@ -775,6 +813,9 @@ class DefaultQuadcopterStrategy:
                 "backward_crossing": backward_penalty,
                 "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
                 "speed": speed_reward,
+                "speed_at_crossing": speed_at_crossing_bonus,
+                "lap_time": lap_time_bonus,
+                "segment_time": -segment_time_penalty,
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             
@@ -1100,6 +1141,8 @@ class DefaultQuadcopterStrategy:
             self.env._desired_pos_w[env_ids_tensor, :2] - self.env._robot.data.root_link_pos_w[env_ids_tensor, :2], dim=1
         )
         self.env._n_gates_passed[env_ids_tensor] = 0
+        self._lap_start_time[env_ids_tensor] = 0.0
+
 
         # Write state to simulation
         self.env._robot.write_root_link_pose_to_sim(default_root_state[:, :7], env_ids_tensor)
@@ -1107,7 +1150,9 @@ class DefaultQuadcopterStrategy:
 
         # Reset variables
         self.env._yaw_n_laps[env_ids_tensor] = 0
+        self._time_since_last_gate[env_ids_tensor] = 0.0
 
+        
         self.env._pose_drone_wrt_gate[env_ids_tensor], _ = subtract_frame_transforms(
             self.env._waypoints[self.env._idx_wp[env_ids_tensor], :3],
             self.env._waypoints_quat[self.env._idx_wp[env_ids_tensor], :],
