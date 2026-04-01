@@ -196,7 +196,7 @@ class DefaultQuadcopterStrategy:
             ]
 
             extra_keys = ["speed_at_crossing"]  # adds extra backwards_crossing key 
-            
+
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
                 for key in keys + extra_keys
@@ -653,8 +653,7 @@ class DefaultQuadcopterStrategy:
         crossed_gate_correct_direction = gate_passed | gate_missed
         
         # 1. Dense progress reward
-        progress_current, current_distance = self._calculate_progress_reward(crossed_gate_correct_direction, gate_centers)
-        # only calc reward for flying towards next gate for success gates
+        progress_current, current_distance, effective_centers = self._calculate_progress_reward(crossed_gate_correct_direction, gate_centers)        # only calc reward for flying towards next gate for success gates
         progress_next_gate = self._calculate_next_gate_progress(gate_passed, gate_centers, next_gate_indices)
 
         # Combine progress from current gate and next gate
@@ -668,7 +667,7 @@ class DefaultQuadcopterStrategy:
         gate_reward = gate_passed.float() * 1.0 + gate_missed.float() * (-1.0)
         
         #  update tracking for next timestep
-        self._update_tracking_variables(gate_passed, current_distance)
+        self._update_tracking_variables(gate_passed, current_distance, gate_centers, effective_centers)
 
         # Compute pose wrt prev gate
         prev_gate_indices = (self.env._idx_wp - 1) % num_gates
