@@ -165,7 +165,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'lap_incomplete_penalty_reward_scale': lap_incomplete_penalty_reward_scale,
         # 'roll_pitch_rates_reward_scale': roll_pitch_rates_reward_scale,
         # 'yaw_rate_reward_scale': yaw_rate_reward_scale,
-        'wrong_direction_penalty': -500.0,   # hitting a gate from the wrong side
+        # 'wrong_direction_penalty': -500.0,   # hitting a gate from the wrong side
         'velocity_toward_gate_reward_scale': 15.0,   # <-- ADD THIS
         'speed_at_crossing_reward_scale':      15.0,  # reward being fast at the gate
     }

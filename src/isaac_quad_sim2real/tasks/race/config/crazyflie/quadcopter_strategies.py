@@ -176,12 +176,37 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["backward_crossing", "speed_at_crossing"]  # adds extra backwards_crossing key 
+            extra_keys = ["speed_at_crossing"]  # adds extra backwards_crossing key 
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
                 for key in keys + extra_keys
             }
+
+
+
+
+        virtual_wp = torch.tensor(
+            [[0.625, 2.8, 2.2, 0.0, 0.0, 1.5708]],   # x aligned w/ gate4, y=2.8 north, z=2.2 elevated
+            dtype=torch.float32, device=self.device
+        )
+
+        # Quaternion: same yaw as surrounding gates (π/2)
+        virtual_quat = quat_from_euler_xyz(
+            torch.zeros(1, device=self.device),
+            torch.zeros(1, device=self.device),
+            torch.tensor([1.5708], device=self.device)
+        )   # shape [1, 4]
+
+        # Normal points +Y (drone approaches virtual gate from the north)
+        virtual_normal = torch.tensor([[0.0, 1.0, 0.0]], dtype=torch.float32, device=self.device)
+
+        # Insert at index 3, shifting the old gate 4 (and beyond) to index 4+
+        env._waypoints = torch.cat([env._waypoints[:3], virtual_wp, env._waypoints[3:]], dim=0)
+        env._waypoints_quat = torch.cat([env._waypoints_quat[:3], virtual_quat, env._waypoints_quat[3:]], dim=0)
+        env._normal_vectors = torch.cat([env._normal_vectors[:3], virtual_normal, env._normal_vectors[3:]], dim=0)
+
+
 
         # Ranges for evaluation with given min / max to mimic the sim2real gap
         self._twr_range = (0.95, 1.05)
@@ -235,6 +260,97 @@ class DefaultQuadcopterStrategy:
             device=self.device,
             noise_std=noise_std
         )
+
+        # Seed virtual gate (index 3) with a couple of representative mid-arc states.
+        # Drone is north of the virtual gate, heading south and descending.
+        VIRTUAL_GATE_ID = 3
+        for seed_pos, seed_vel in [
+            (torch.tensor([0.625, 3.5, 2.8], device=self.device),
+            torch.tensor([0.0, -3.0, -0.8], device=self.device)),
+            (torch.tensor([0.625, 2.5, 2.4], device=self.device),
+            torch.tensor([0.0, -4.5, -0.4], device=self.device)),
+        ]:
+            self._reset_buffer.store(
+                gate_id=VIRTUAL_GATE_ID,
+                pos=seed_pos,
+                lin_vel=seed_vel,
+                quat=quat_from_euler_xyz(          # yaw=π (heading south)
+                    torch.zeros(1, device=self.device),
+                    torch.zeros(1, device=self.device),
+                    torch.tensor([3.1416], device=self.device)
+                )[0],
+                ang_vel=torch.zeros(3, device=self.device),
+                motor_speeds=torch.zeros(4, device=self.device) + 500.0
+            )
+
+
+        GATE_LABELS = {
+            0: "Gate 0 (real)",
+            1: "Gate 1 (real)",
+            2: "Gate 2 (real)",
+            3: "Gate 3 (real)",
+            4: "Gate 4 (real)",
+            5: "Gate 5 (real)",
+            6: "Gate 6 (real)",
+            7: "Gate 7 (real)",
+        }
+        VIRTUAL_INDICES = {3}  # mark virtual gates clearly
+
+        n = self.env._waypoints.shape[0]
+        print("\n" + "=" * 70)
+        print(f"  WAYPOINT DEBUG  ({n} total gates)")
+        print("=" * 70)
+
+        for i in range(n):
+            label = "VIRTUAL" if i in VIRTUAL_INDICES else f"Gate {i}"
+            wp   = self.env._waypoints[i]         # [x, y, z, roll, pitch, yaw]
+            quat = self.env._waypoints_quat[i]    # [qw, qx, qy, qz]
+            norm = self.env._normal_vectors[i]    # [nx, ny, nz]
+            buf_count = self._reset_buffer.get_count(i)
+
+            print(f"\n  [{i}] {label}")
+            print(f"       pos  : x={wp[0]:.4f}  y={wp[1]:.4f}  z={wp[2]:.4f}")
+            print(f"       rpy  : r={wp[3]:.4f}  p={wp[4]:.4f}  yaw={wp[5]:.4f} rad  ({wp[5]*180/3.14159:.1f} deg)")
+            print(f"       quat : w={quat[0]:.4f}  x={quat[1]:.4f}  y={quat[2]:.4f}  z={quat[3]:.4f}")
+            print(f"       normal: [{norm[0]:.3f}, {norm[1]:.3f}, {norm[2]:.3f}]")
+            print(f"       buffer: {buf_count} seed states")
+
+            # For every seeded state, transform into this gate's frame and check X > 0
+            if buf_count > 0:
+                print(f"       -- Seed state gate-frame X values (must all be > 0) --")
+                for s in range(buf_count):
+                    state = self._reset_buffer._buffer[i, s]
+                    seed_pos = state[0:3].unsqueeze(0)
+                    gate_pos = wp[:3].unsqueeze(0)
+                    gate_q   = quat.unsqueeze(0)
+                    p_in_frame, _ = subtract_frame_transforms(gate_pos, gate_q, seed_pos)
+                    x_val = p_in_frame[0, 0].item()
+                    status = "✓" if x_val > 0.0 else "✗ WRONG SIDE"
+                    print(f"           seed {s}: world=({state[0]:.2f}, {state[1]:.2f}, {state[2]:.2f})  "
+                        f"gate_frame_X={x_val:.3f}  {status}")
+
+        # Validate sequential gate ordering makes geometric sense
+        print("\n" + "-" * 70)
+        print("  SEQUENTIAL GATE CHECKS (each gate's center in next gate's frame)")
+        print("-" * 70)
+        for i in range(n):
+            next_i = (i + 1) % n
+            gate_pos  = self.env._waypoints[i, :3].unsqueeze(0)
+            next_pos  = self.env._waypoints[next_i, :3].unsqueeze(0)
+            next_quat = self.env._waypoints_quat[next_i].unsqueeze(0)
+
+            # Where is gate i, expressed in gate (i+1)'s local frame?
+            g_in_next, _ = subtract_frame_transforms(next_pos, next_quat, gate_pos)
+            x = g_in_next[0, 0].item()
+            y = g_in_next[0, 1].item()
+            z = g_in_next[0, 2].item()
+
+            # Drone approaches next gate from +X side, so previous gate should be at X > 0
+            approach_ok = "✓ drone approaches from correct side" if x > 0 else "✗ CHECK APPROACH DIRECTION"
+            print(f"  Gate {i:2d} → Gate {next_i:2d}: gate{i} in gate{next_i}_frame = "
+                f"({x:+.2f}, {y:+.2f}, {z:+.2f})  {approach_ok}")
+
+        print("=" * 70 + "\n")
 
     def _randomize_dynamics(self, env_ids: torch.Tensor):
         """Randomize dynamics parameters for specified environments.
@@ -540,7 +656,6 @@ class DefaultQuadcopterStrategy:
 
             # wrong direction penalty
             wrong_direction = (gate_crossed_backward | prev_gate_crossed_backward).float()
-            backward_penalty = wrong_direction * self.env.rew.get('wrong_direction_penalty', -200.0)
 
             # ---- ADD THESE LINES ----
             # Reward velocity component pointing directly at current gate center.
@@ -574,7 +689,6 @@ class DefaultQuadcopterStrategy:
                 "lap_incomplete_penalty": lap_penalty,
                 # "roll_pitch_rates": roll_pitch_rates_penalty,
                 # "yaw_rate": yaw_rate_penalty,
-                "backward_crossing": backward_penalty,
                 "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
                 "speed_at_crossing": speed_at_crossing_bonus,
             }
