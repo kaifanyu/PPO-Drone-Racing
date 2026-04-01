@@ -713,18 +713,6 @@ class DefaultQuadcopterStrategy:
         self._handle_gate_crossing(gate_passed)
 
 
-        # 1. Dense progress reward
-        progress_current, current_distance, effective_centers = self._calculate_progress_reward(crossed_gate_correct_direction, gate_centers)
-        # only calc reward for flying towards next gate for success gates
-        progress_next_gate = self._calculate_next_gate_progress(gate_passed, gate_centers, next_gate_indices)
-
-        # Combine progress from current gate and next gate
-        progress = progress_current + progress_next_gate
-        
-        # 2. Sparse reward for target reached: 1 / -1
-        # advance waypoint index for passed gates only
-        self._handle_gate_crossing(gate_passed)
-
         #  update tracking for next timestep
         self._update_tracking_variables(gate_passed, current_distance, gate_centers, effective_centers)
 
@@ -833,7 +821,7 @@ class DefaultQuadcopterStrategy:
             # Update lap start for envs that just completed a lap
             self._lap_start_step = torch.where(just_completed_lap, self.env.episode_length_buf.float(), self._lap_start_step)
             # Reward: 500 / lap_time — 10s lap = 50, 5s lap = 100, 3s lap = 167
-            lap_time_bonus = just_completed_lap.float() * (500.0 / lap_time_s)
+            lap_time_bonus = just_completed_lap.float() * (500.0 / lap_time_s).clamp(max=150.0)
 
             # Aggregate
             rewards = {
