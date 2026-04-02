@@ -310,7 +310,7 @@ class DefaultQuadcopterStrategy:
             dtype=torch.float32, device=self.device
         )
         up_vel = torch.tensor(
-            [0.0, -3.5, -0.3],           # heading south toward virtual gate
+            [0.0, -6.0, -0.5],           # heading south toward virtual gate
             dtype=torch.float32, device=self.device
         )
         self._seed_loop_buffer(VIRTUAL_GATE_ID, up_pos, up_vel)
@@ -573,7 +573,15 @@ class DefaultQuadcopterStrategy:
             drone_quat = self.env._robot.data.root_quat_w[ids_to_next_gate]
             drone_ang_vel = self.env._robot.data.root_com_ang_vel_w[ids_to_next_gate]
             drone_motor_speeds = self.env._motor_speeds[ids_to_next_gate]
-            
+                
+                
+            if not hasattr(self, '_gate_crossing_step'):
+                self._gate_crossing_step = torch.zeros(self.num_envs, self.num_gates, device=self.device)
+
+            self._gate_crossing_step[ids_to_next_gate, current_gate_idx] = \
+                self.env.episode_length_buf[ids_to_next_gate].float()
+
+
             # Store states to reset buffer per gate crossing
             for i, env_idx in enumerate(ids_to_next_gate):
                 gate_id = current_gate_idx[i].item()
@@ -599,6 +607,7 @@ class DefaultQuadcopterStrategy:
 
             self._prev_pose_drone_wrt_gate[ids_to_next_gate] = new_pose_drone_wrt_gate
             self.env._prev_x_drone_wrt_gate[ids_to_next_gate] = new_pose_drone_wrt_gate[:, 0]
+
 
     def _update_tracking_variables(self, gate_passed, current_distance, gate_centers, effective_centers):
         ids_not_passed = torch.where(~gate_passed)[0]
@@ -692,7 +701,7 @@ class DefaultQuadcopterStrategy:
             gate_reward_scaled = gate_reward * self.env.rew['target_reached_bonus_reward_scale']
 
             laps_completed = self.env._n_gates_passed // num_gates  # single definition
-            lap_penalty    = self.env.rew['lap_incomplete_penalty_reward_scale'] * (laps_completed < 3).float()
+            lap_penalty    = self.env.rew['lap_incomplete_penalty_reward_scale'] * (laps_completed < 1).float()
             
             
             vel_w = self.env._robot.data.root_com_lin_vel_w
@@ -804,42 +813,6 @@ class DefaultQuadcopterStrategy:
             # eval mode no rewards
             reward = torch.zeros(self.num_envs, device=self.device)
         
-        # At the top of get_rewards(), add a step counter if you don't have one
-        # if not hasattr(self, '_debug_step'):
-        #     self._debug_step = 0
-        # self._debug_step += 1
-        # LOG_EVERY = 500  # print every 500 steps
-
-        # if self._debug_step % LOG_EVERY == 0:
-        #     # --- 1. Episode length distribution ---
-        #     print(f"[REWARD_DEBUG] episode_length | mean={self.env.episode_length_buf.float().mean():.1f} "
-        #         f"min={self.env.episode_length_buf.min().item():.1f} "
-        #         f"max={self.env.episode_length_buf.max().item():.1f}")
-
-        #     # --- 2. How many gates are being passed per episode ---
-        #     print(f"[REWARD_DEBUG] gates_passed   | mean={self.env._n_gates_passed.float().mean():.2f} "
-        #         f"max={self.env._n_gates_passed.max().item()}")
-
-        #     # --- 3. Crash rate ---
-        #     death_rate = self.env.reset_terminated.float().mean().item()
-        #     print(f"[REWARD_DEBUG] death_rate     | {death_rate:.3f}  (>0.5 means agent is crashing on purpose)")
-
-        #     # --- 4. Current speed distribution ---
-        #     speed = torch.norm(self.env._robot.data.root_com_lin_vel_w, dim=1)
-        #     print(f"[REWARD_DEBUG] speed (m/s)    | mean={speed.mean():.2f} "
-        #         f"max={speed.max():.2f} min={speed.min():.2f}")
-
-        #     # --- 5. Raw reward component magnitudes (BEFORE scaling) ---
-        #     print(f"[REWARD_DEBUG] progress_raw   | mean={progress.mean():.4f}  "
-        #         f"(scaled={( progress * self.env.rew['progress_goal_reward_scale']).mean():.2f})")
-        #     print(f"[REWARD_DEBUG] vel_raw        | mean={vel_toward_gate.mean():.4f}  "
-        #         f"(scaled={(vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']).mean():.2f})")
-        #     print(f"[REWARD_DEBUG] lap_penalty    | mean={lap_penalty.mean():.4f}")
-
-        #     # --- 6. Accumulated reward per component this episode (from episode_sums) ---
-        #     for key, tensor in self._episode_sums.items():
-        #         print(f"[REWARD_DEBUG] episodic_sum/{key:30s} | mean={tensor.mean():.1f}")
-
         return reward
     
 
@@ -1152,6 +1125,65 @@ class DefaultQuadcopterStrategy:
         self.env._last_distance_to_goal[env_ids_tensor] = torch.linalg.norm(
             self.env._desired_pos_w[env_ids_tensor, :2] - self.env._robot.data.root_link_pos_w[env_ids_tensor, :2], dim=1
         )
+
+
+
+        # --- SEGMENT TIMING DEBUG ---
+        if self.cfg.is_train and hasattr(self, '_gate_crossing_step'):
+            # Only print for envs that completed at least one full lap (8 gates)
+            gates_passed = self.env._n_gates_passed[env_ids_tensor]
+            completed_envs = torch.where(gates_passed >= self.env._waypoints.shape[0])[0]
+            
+            if completed_envs.numel() > 0:
+                num_gates = self.env._waypoints.shape[0]
+                
+                # For each completed env, compute per-segment step deltas
+                # segment_times[g] = steps spent between gate g-1 and gate g
+                segment_steps = torch.zeros(num_gates, device=self.device)
+                segment_counts = torch.zeros(num_gates, device=self.device)
+                
+                for local_i in completed_envs:
+                    env_i = env_ids_tensor[local_i]
+                    crossings = self._gate_crossing_step[env_i]  # [num_gates]
+                    
+                    # Skip envs with missing crossings (crashed mid-lap)
+                    if (crossings < 0).any():
+                        continue
+                    
+                    for g in range(num_gates):
+                        prev_g = (g - 1) % num_gates
+                        if g == 0:
+                            # Gate 0: steps from episode start
+                            delta = crossings[0]
+                        else:
+                            delta = crossings[g] - crossings[prev_g]
+                        
+                        if delta > 0:
+                            segment_steps[g] += delta
+                            segment_counts[g] += 1
+                
+                print(f"\n[SEGMENT_TIMING] --- Per-Gate Step Counts (mean over {completed_envs.numel()} envs) ---")
+                gate_labels = ['G0', 'G1', 'G2', 'VIRT', 'G4(loop)', 'G5', 'G6', 'G7']
+                total_steps = 0.0
+                for g in range(num_gates):
+                    if segment_counts[g] > 0:
+                        mean_steps = (segment_steps[g] / segment_counts[g]).item()
+                        mean_secs  = mean_steps * self.env.step_dt
+                        label = gate_labels[g] if g < len(gate_labels) else f'G{g}'
+                        total_steps += mean_steps
+                        print(f"[SEGMENT_TIMING]   {label:10s}: {mean_steps:6.1f} steps  ({mean_secs:.2f}s)")
+                print(f"[SEGMENT_TIMING]   {'TOTAL':10s}: {total_steps:6.1f} steps  ({total_steps * self.env.step_dt:.2f}s)")
+                print()
+
+        # Reset the crossing tracker for resetting envs
+        if hasattr(self, '_gate_crossing_step'):
+            self._gate_crossing_step[env_ids_tensor] = -1.0
+        # --- END SEGMENT TIMING DEBUG ---
+
+
+
+
+
         self.env._n_gates_passed[env_ids_tensor] = 0
 
         # Write state to simulation
