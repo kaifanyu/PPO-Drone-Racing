@@ -135,6 +135,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             log_dir += f"_{agent_cfg.run_name}"
         log_dir = os.path.join(log_root_path, log_dir)
 
+    # TODO ----- START ----- Define rewards scales
+    # reward scales - override with CLI arguments
+    progress_goal_reward_scale = 20.0
+    target_reached_bonus_reward_scale = 400.0
+    death_cost = -500.0
+    lap_incomplete_penalty_reward_scale = -0.01
+    roll_pitch_rates_reward_scale = -1  # Penalty for aggressive roll/pitch rates
+    yaw_rate_reward_scale = -0.5  # Penalty for aggressive yaw rate
 
     # CLI overrides for reward scaling
     if args_cli.progress_scale is not None:
@@ -154,14 +162,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'progress_goal_reward_scale':          30.0,
         'target_reached_bonus_reward_scale':   700.0,
         'death_cost':                         -500.0,
-        'lap_incomplete_penalty_reward_scale': -0.5,
-        'velocity_toward_gate_reward_scale':   20.0,
-        'speed_at_crossing_reward_scale':      8.0,   # slight bump — main speed signal
-        'speed_threshold_scale':               15.0,   # main normal segment signal
-        'three_lap_time_bonus':              3000.0,   # must be here or it won't apply
-        'arc_velocity_scale':   3.0,   # weak — just guide, don't push
-        'arc_altitude_scale':   5.0,   # reward correct height during loop
-        'line_deviation_penalty_scale':        7.5,  # uncomment but start gentle
+        'lap_incomplete_penalty_reward_scale': -0.05,
+        'wrong_direction_penalty':            -200.0,
+        'velocity_toward_gate_reward_scale':   10.0,
+        'speed_at_crossing_reward_scale':      60.0,
+        'speed_threshold_scale':               15.0,
+        'line_deviation_penalty_scale':         1.0,
+        'three_lap_time_bonus':              3000.0,
     }
 
     env_cfg.is_train = True
