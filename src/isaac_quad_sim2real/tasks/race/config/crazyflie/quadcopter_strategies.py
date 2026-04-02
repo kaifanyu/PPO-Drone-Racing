@@ -931,20 +931,41 @@ class DefaultQuadcopterStrategy:
         # Randomize dynamics parameters for the resetting environments
         self._randomize_dynamics(env_ids_tensor)
 
-        # Logging for training mode
         if self.cfg.is_train and hasattr(self, '_episode_sums'):
+            ep_len = max(self.env.episode_length_buf[env_ids_tensor].float().mean().item(), 1)
+            gates  = self.env._n_gates_passed[env_ids_tensor].float().mean().item()
+
+            # DEBUG — read BEFORE zeroing
+            component_strs = []
+            total = 0.0
+            for k, v in self._episode_sums.items():
+                mean_val = v[env_ids_tensor].mean().item()
+                total += mean_val
+                component_strs.append(f"{k}={mean_val:.0f}")
+
+            # ── Add curriculum scales to wandb log ───────────────────────────
+            itr = self.env.iteration
+            def ramp(start_itr, end_itr, v_min=0.0, v_max=1.0):
+                t = (itr - start_itr) / max(end_itr - start_itr, 1)
+                return v_min + (v_max - v_min) * max(0.0, min(1.0, t))
+
+
+            print(f"[EPISODE_DEBUG] ep_len={ep_len:.0f} gates={gates:.1f} "
+                  f"total={total:.0f} per_step={total/ep_len:.2f}")
+            print(f"[EPISODE_DEBUG] breakdown: {' | '.join(component_strs)}")
+
             extras = dict()
             for key in self._episode_sums.keys():
                 episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids_tensor])
                 extras["Episode_Reward/" + key] = episodic_sum_avg / self.env.max_episode_length_s
                 self._episode_sums[key][env_ids_tensor] = 0.0
-            self.env.extras["log"] = dict()
-            self.env.extras["log"].update(extras)
-            extras = dict()
+
+            # Add termination stats to the SAME extras dict, not a separate one
             extras["Episode_Termination/died"] = torch.count_nonzero(self.env.reset_terminated[env_ids_tensor]).item()
             extras["Episode_Termination/time_out"] = torch.count_nonzero(self.env.reset_time_outs[env_ids_tensor]).item()
-            self.env.extras["log"].update(extras)
 
+            # Write once
+            self.env.extras["log"] = extras
         # Call robot reset first
         self.env._robot.reset(env_ids_tensor)
 
