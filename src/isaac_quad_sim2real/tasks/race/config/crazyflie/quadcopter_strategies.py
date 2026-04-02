@@ -810,8 +810,21 @@ class DefaultQuadcopterStrategy:
 
             speed       = torch.norm(vel_w, dim=1)
             speed_above = (speed - current_threshold).clamp(min=0.0)
-            threshold_reward = speed_above * self.env.rew.get('speed_threshold_scale', 8.0) \
-                            * in_normal_segment.float()
+
+
+            speed_curriculum_start = 400  # don't push speed until drone can fly
+            speed_ramp_iters = 200        # ramp from 0 to full over 200 iters
+
+            if self.env.iteration < speed_curriculum_start:
+                threshold_reward = torch.zeros(self.num_envs, device=self.device)
+            else:
+                ramp = min((self.env.iteration - speed_curriculum_start) / speed_ramp_iters, 1.0)
+                stage = min(self.env.iteration // 200, 6)
+                current_threshold = base_threshold + stage * threshold_increment
+                speed_above = (speed - current_threshold).clamp(min=0.0)
+                threshold_reward = speed_above * self.env.rew.get('speed_threshold_scale', 8.0) \
+                                * in_normal_segment.float() * ramp
+
 
             # velocity_toward_gate only fires on arc segments now
             # on normal segments it's replaced by threshold_reward
