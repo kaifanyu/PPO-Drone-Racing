@@ -164,13 +164,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'death_cost':                         -500.0,
         'lap_incomplete_penalty_reward_scale': -0.05,
         'wrong_direction_penalty':            -200.0,
-        'velocity_toward_gate_reward_scale':   10.0,
+        'velocity_toward_gate_reward_scale':    3.0,   # was 10.0 — was dominating
         'speed_at_crossing_reward_scale':      60.0,
         'speed_threshold_scale':               15.0,
         'line_deviation_penalty_scale':         1.0,
         'three_lap_time_bonus':              3000.0,
     }
-
     env_cfg.is_train = True
     env_cfg.rewards = rewards
     env_cfg.reset_time = args_cli.reset_time

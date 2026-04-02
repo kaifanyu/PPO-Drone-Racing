@@ -537,17 +537,17 @@ class DefaultQuadcopterStrategy:
             # Phase 4 (600–800): speed, line deviation, backward penalty fade in
             # Phase 5 (800+):    lap penalty and time bonus active
 
-            scale_progress    = 1.0                          # always on
-            scale_velocity    = 1.0                          # always on
-            scale_gate        = ramp(400, 550)               # gates 400→550
-            scale_death       = ramp(450, 650)               # death 450→650
-            scale_speed_cross = ramp(500, 650)               # speed@crossing 500→650
-            scale_speed_thr   = ramp(550, 700)               # speed threshold 550→700
-            scale_line        = ramp(600, 750)               # line deviation 600→750
-            scale_backward    = ramp(600, 750)               # wrong direction 600→750
-            scale_lap_penalty = ramp(700, 850)               # lap penalty 700→850
-            scale_time_bonus  = ramp(800, 950)               # time bonus 800→950
-
+            scale_progress    = 1.0
+            scale_velocity    = 1.0
+            scale_gate        = ramp(0,   100)    # was 400→550, active immediately
+            scale_death       = ramp(50,  200)    # was 450→650
+            scale_speed_cross = ramp(100, 250)    # was 500→650
+            scale_speed_thr   = ramp(150, 300)    # was 550→700
+            scale_line        = ramp(200, 350)    # was 600→750
+            scale_backward    = ramp(200, 350)    # was 600→750
+            scale_lap_penalty = ramp(300, 450)    # was 700→850
+            scale_time_bonus  = ramp(400, 550)    # was 800→950
+            
             # ── Core rewards ─────────────────────────────────────────────────────
             progress_reward    = progress * self.env.rew['progress_goal_reward_scale'] * scale_progress
             gate_reward_scaled = gate_reward * self.env.rew['target_reached_bonus_reward_scale'] * scale_gate
@@ -747,6 +747,33 @@ class DefaultQuadcopterStrategy:
                 mean_val = v[env_ids_tensor].mean().item()
                 total += mean_val
                 component_strs.append(f"{k}={mean_val:.0f}")
+
+            # ── Add curriculum scales to wandb log ───────────────────────────
+            itr = self.env.iteration
+            def ramp(start_itr, end_itr, v_min=0.0, v_max=1.0):
+                t = (itr - start_itr) / max(end_itr - start_itr, 1)
+                return v_min + (v_max - v_min) * max(0.0, min(1.0, t))
+
+            self.env.extras["log"].update({
+                # Curriculum scale visibility
+                "Curriculum/scale_gate":        ramp(400, 550),
+                "Curriculum/scale_death":       ramp(450, 650),
+                "Curriculum/scale_speed_cross": ramp(500, 650),
+                "Curriculum/scale_speed_thr":   ramp(550, 700),
+                "Curriculum/scale_line":        ramp(600, 750),
+                "Curriculum/scale_backward":    ramp(600, 750),
+                "Curriculum/scale_lap_penalty": ramp(700, 850),
+                "Curriculum/scale_time_bonus":  ramp(800, 950),
+
+                # Episode stats
+                "Episode_Stats/gates_per_episode": self.env._n_gates_passed[env_ids_tensor].float().mean().item(),
+                "Episode_Stats/ep_len":            self.env.episode_length_buf[env_ids_tensor].float().mean().item(),
+                "Episode_Stats/reward_per_step":   (
+                    sum(v[env_ids_tensor].mean().item() for v in self._episode_sums.values())
+                    / max(self.env.episode_length_buf[env_ids_tensor].float().mean().item(), 1)
+                ),
+            })
+
             print(f"[EPISODE_DEBUG] ep_len={ep_len:.0f} gates={gates:.1f} "
                   f"total={total:.0f} per_step={total/ep_len:.2f}")
             print(f"[EPISODE_DEBUG] breakdown: {' | '.join(component_strs)}")
@@ -757,6 +784,7 @@ class DefaultQuadcopterStrategy:
                 episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids_tensor])
                 extras["Episode_Reward/" + key] = episodic_sum_avg / self.env.max_episode_length_s
                 self._episode_sums[key][env_ids_tensor] = 0.0   # zero AFTER reading
+            
             self.env.extras["log"] = dict()
             self.env.extras["log"].update(extras)
             extras = dict()
