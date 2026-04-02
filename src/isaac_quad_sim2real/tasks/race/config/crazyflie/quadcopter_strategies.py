@@ -478,18 +478,26 @@ class DefaultQuadcopterStrategy:
         crossed_gate_correct_direction: torch.Tensor,
         gate_centers: torch.Tensor,
     ) -> torch.Tensor:
-        LOOP_GATE_IDX = 4
-        via_point = torch.tensor([0.5, 2.2, 2.8], device=self.device)
-
         drone_pos = self.env._robot.data.root_link_pos_w
+        VIRTUAL_GATE_IDX = self._virtual_gate_index  # 3
+        LOOP_GATE_IDX = 4
+
+        # Via-point that pulls the drone north+high before it dives through the virtual gate
+        virtual_via_point = torch.tensor([0.625, 2.5, 2.0], device=self.device)
+        loop_via_point    = torch.tensor([0.5,   2.2, 2.8], device=self.device)
+
+        targeting_virtual = (self.env._idx_wp == VIRTUAL_GATE_IDX)
+        targeting_loop    = (self.env._idx_wp == LOOP_GATE_IDX)
+
         gate_frame_x = self.env._pose_drone_wrt_gate[:, 0]
+        needs_arc_virtual = targeting_virtual & (gate_frame_x < 3.0)
+        needs_arc_loop    = targeting_loop    & (gate_frame_x < 3.0)
+        needs_arc         = needs_arc_virtual | needs_arc_loop
 
-        targeting_loop = (self.env._idx_wp == LOOP_GATE_IDX)
-        needs_arc = targeting_loop & (gate_frame_x < 3.0)
-
-        # Effective gate center for distance computation
+        # Build effective centers
         effective_centers = gate_centers.clone()
-        effective_centers[needs_arc] = via_point.unsqueeze(0).expand(needs_arc.sum(), -1)
+        effective_centers[needs_arc_virtual] = virtual_via_point.unsqueeze(0).expand(needs_arc_virtual.sum(), -1)
+        effective_centers[needs_arc_loop]    = loop_via_point.unsqueeze(0).expand(needs_arc_loop.sum(), -1)
 
         curr_3d_dist = torch.norm(drone_pos - effective_centers, dim=1)
         euclidean_progress = self._prev_distance_to_gate - curr_3d_dist
@@ -737,20 +745,27 @@ class DefaultQuadcopterStrategy:
                 # ── Velocity toward gate (arc-aware) ──────────────────────────────
                 drone_pos         = self.env._robot.data.root_link_pos_w
                 next_gate_centers = self.env._waypoints[next_gate_indices, :3]
+                VIRTUAL_GATE_IDX  = self._virtual_gate_index  # 3
+                LOOP_GATE_IDX     = 4
 
-                LOOP_GATE_IDX = 4
-                via_point = torch.tensor([0.5, 2.2, 2.8], device=self.device)
+                virtual_via_point = torch.tensor([0.625, 2.5, 2.0], device=self.device)
+                loop_via_point    = torch.tensor([0.5,   2.2, 2.8], device=self.device)
 
-                targeting_loop = (self.env._idx_wp == LOOP_GATE_IDX)
-                gate_frame_x   = self.env._pose_drone_wrt_gate[:, 0]
-                needs_arc      = targeting_loop & (gate_frame_x < 3.0)
+                targeting_virtual = (self.env._idx_wp == VIRTUAL_GATE_IDX)
+                targeting_loop    = (self.env._idx_wp == LOOP_GATE_IDX)
+                gate_frame_x      = self.env._pose_drone_wrt_gate[:, 0]
+                needs_arc_virtual = targeting_virtual & (gate_frame_x < 3.0)
+                needs_arc_loop    = targeting_loop    & (gate_frame_x < 3.0)
+                needs_arc         = needs_arc_virtual | needs_arc_loop
 
+                # Single effective_target used for BOTH progress and velocity
                 effective_target = gate_centers.clone()
-                effective_target[needs_arc] = via_point.unsqueeze(0).expand(needs_arc.sum(), -1)
+                effective_target[needs_arc_virtual] = virtual_via_point.unsqueeze(0).expand(needs_arc_virtual.sum(), -1)
+                effective_target[needs_arc_loop]    = loop_via_point.unsqueeze(0).expand(needs_arc_loop.sum(), -1)
 
-                gate_dir       = effective_target - drone_pos
-                next_gate_dir  = next_gate_centers - drone_pos
-                gate_dist      = torch.norm(gate_dir,      dim=1, keepdim=True).clamp(min=0.1)
+                gate_dir      = effective_target - drone_pos   # ← was effective_target (loop-only before)
+                next_gate_dir = next_gate_centers - drone_pos
+                gate_dist     = torch.norm(gate_dir,      dim=1, keepdim=True).clamp(min=0.1)
                 next_gate_dist = torch.norm(next_gate_dir, dim=1, keepdim=True).clamp(min=0.1)
                 gate_dir_unit      = gate_dir      / gate_dist
                 next_gate_dir_unit = next_gate_dir / next_gate_dist
@@ -760,9 +775,11 @@ class DefaultQuadcopterStrategy:
                 alignment_score = (vel_w * gate_dir_unit).sum(dim=1).clamp(min=0.0)
 
                 # Suppress velocity reward for gate 4 arc phase — straight-line signal fights the loop
-                far_from_gate    = (gate_dist.squeeze(1) > 2.0)
-                velocity_scale   = torch.where(
-                    targeting_loop & far_from_gate,
+                far_from_gate   = (gate_dist.squeeze(1) > 2.0)
+                arc_and_far     = (targeting_loop | targeting_virtual) & far_from_gate
+
+                velocity_scale  = torch.where(
+                    arc_and_far,
                     torch.zeros(self.num_envs, device=self.device),
                     torch.ones(self.num_envs, device=self.device)
                 )
@@ -805,9 +822,9 @@ class DefaultQuadcopterStrategy:
                 between_gates     = (along.squeeze(1) > 0.0) & \
                                     (along.squeeze(1) < gate_to_gate_dist.squeeze(1))
                 # Suppress line deviation penalty for gate 4 — the loop inherently deviates
-                not_loop_gate = ~targeting_loop
+                not_arc_gate = ~(targeting_loop | targeting_virtual)
                 line_penalty = (
-                    -lateral_dist * between_gates.float() * not_loop_gate.float()
+                    -lateral_dist * between_gates.float() * not_arc_gate.float()
                     * self.env.rew.get('line_deviation_penalty_scale', 3.0)
                     * scale_line
                 )
