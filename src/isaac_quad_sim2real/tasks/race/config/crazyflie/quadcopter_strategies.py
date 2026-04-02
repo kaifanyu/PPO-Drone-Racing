@@ -616,8 +616,14 @@ class DefaultQuadcopterStrategy:
             for key, value in rewards.items():
                 self._episode_sums[key] += value
             
-            # overrid all rewards when death
-            reward = torch.where(self.env.reset_terminated, torch.ones_like(reward) * self.env.rew['death_cost'],reward)
+            num_gates = self.env._waypoints.shape[0]
+            finished_race = (self.env._n_gates_passed // num_gates) >= 3
+
+            reward = torch.where(
+                self.env.reset_terminated & ~finished_race,
+                torch.ones_like(reward) * self.env.rew['death_cost'],
+                reward
+            )
         else:
             # eval mode no rewards
             reward = torch.zeros(self.num_envs, device=self.device)
