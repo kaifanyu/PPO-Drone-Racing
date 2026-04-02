@@ -707,19 +707,15 @@ class DefaultQuadcopterStrategy:
         for g in ARC_GATE_INDICES:
             in_arc_segment |= (self.env._idx_wp == g)
         in_normal_segment = ~in_arc_segment
-
-
-        # store for next timestep
-        self._prev_pose_drone_wrt_prev_gate = current_pose_prev_gate.clone()
+        
         if self.cfg.is_train:
             progress_reward    = progress * self.env.rew['progress_goal_reward_scale']
             gate_reward_scaled = gate_reward * self.env.rew['target_reached_bonus_reward_scale']
 
-            laps_completed = self.env._n_gates_passed // num_gates  # single definition
+            laps_completed = self.env._n_gates_passed // num_gates
             lap_penalty    = self.env.rew['lap_incomplete_penalty_reward_scale'] * (laps_completed < 1).float()
-            
-            
-            vel_w = self.env._robot.data.root_com_lin_vel_w
+
+            vel_w            = self.env._robot.data.root_com_lin_vel_w
             next_gate_centers = self.env._waypoints[next_gate_indices, :3]
 
             gate_dir      = gate_centers - self.env._robot.data.root_link_pos_w
@@ -731,48 +727,32 @@ class DefaultQuadcopterStrategy:
             gate_dir_unit      = gate_dir      / gate_dist
             next_gate_dir_unit = next_gate_dir / next_gate_dist
 
-            # Only blend toward next gate when within 2m of current gate
-            # Far away = 100% toward current gate (direct line)
-            # Close    = up to 30% toward next gate (late apex)
-            transition_radius = 3.5   # meters — start anticipating next gate here
-            next_gate_weight = (1.0 - (gate_dist.squeeze(1) / transition_radius).clamp(0.0, 1.0)) * 0.6 # Allow up to 60% bias towards the next gate
-            curr_gate_weight = 1.0 - next_gate_weight
+            transition_radius = 3.5
+            next_gate_weight  = (1.0 - (gate_dist.squeeze(1) / transition_radius).clamp(0.0, 1.0)) * 0.6
+            curr_gate_weight  = 1.0 - next_gate_weight
 
-            blended_dir = (curr_gate_weight.unsqueeze(1) * gate_dir_unit + 
+            blended_dir = (curr_gate_weight.unsqueeze(1) * gate_dir_unit +
                         next_gate_weight.unsqueeze(1) * next_gate_dir_unit)
             blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
 
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
+            crossing_speed  = torch.norm(vel_w, dim=1)
 
-            crossing_speed        = torch.norm(vel_w, dim=1)
-            speed_at_crossing_bonus = gate_passed.float() * crossing_speed * self.env.rew['speed_at_crossing_reward_scale']
-
-            prev_laps           = (self.env._n_gates_passed - gate_passed.int()) // num_gates
+            prev_laps            = (self.env._n_gates_passed - gate_passed.int()) // num_gates
             just_finished_3_laps = (laps_completed >= 3) & (prev_laps < 3)
-            steps_taken         = self.env.episode_length_buf.float()
+            steps_taken          = self.env.episode_length_buf.float()
             time_bonus = (3000.0 * (0.1 + 0.9 * (1.0 - (steps_taken / 1800).clamp(0.0, 1.0)))) \
                         * just_finished_3_laps.float()
 
-            # --- NORMAL SEGMENT REWARDS (gates 0,1,2,5,6,7) ---
-            # Full speed incentives, blended direction, speed at crossing
-            velocity_reward_normal = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
-            speed_crossing_normal  = gate_passed.float() * crossing_speed * self.env.rew['speed_at_crossing_reward_scale']
-
-            # --- ARC SEGMENT REWARDS (virtual gate + gate 4) ---
-            # No speed reward — just guide through the arc precisely
-            # Use pure gate-direction with NO next-gate blend
+            # --- ARC SEGMENT ---
             arc_gate_dir      = gate_centers - self.env._robot.data.root_link_pos_w
             arc_gate_dist     = torch.norm(arc_gate_dir, dim=1, keepdim=True).clamp(min=0.1)
             arc_gate_dir_unit = arc_gate_dir / arc_gate_dist
             vel_toward_arc    = (vel_w * arc_gate_dir_unit).sum(dim=1).clamp(min=0.0)
 
-            # Weaker velocity scale — guide not push
-            velocity_reward_arc   = vel_toward_arc * self.env.rew.get('arc_velocity_scale', 3.0)
-            # No speed_at_crossing bonus for arc gates — don't incentivize blasting through
-            speed_crossing_arc    = torch.zeros(self.num_envs, device=self.device)
+            velocity_reward_arc = vel_toward_arc * self.env.rew.get('arc_velocity_scale', 3.0)
+            speed_crossing_arc  = torch.zeros(self.num_envs, device=self.device)
 
-            # Altitude reward — bonus for being at the right height during arc
-            # Virtual gate is at z=1.5, gate 4 at z=0.75
             target_z = torch.where(
                 self.env._idx_wp == self._virtual_gate_index,
                 torch.full((self.num_envs,), 1.5, device=self.device),
@@ -782,27 +762,9 @@ class DefaultQuadcopterStrategy:
             altitude_reward_arc = torch.exp(-z_error * 2.0) * self.env.rew.get('arc_altitude_scale', 5.0)
             altitude_reward_arc = altitude_reward_arc * in_arc_segment.float()
 
-            # --- COMBINE --- 
-            velocity_reward      = torch.where(in_arc_segment, velocity_reward_arc,   velocity_reward_normal)
-            speed_crossing_bonus = torch.where(in_arc_segment, speed_crossing_arc,    speed_crossing_normal)
+            # --- NORMAL SEGMENT ---
+            speed_crossing_normal  = gate_passed.float() * crossing_speed * self.env.rew['speed_at_crossing_reward_scale']
 
-            # Line deviation — normal segments only
-            drone_pos     = self.env._robot.data.root_link_pos_w
-            gate_to_gate  = next_gate_centers - gate_centers
-            gate_to_gate_unit = gate_to_gate / torch.norm(gate_to_gate, dim=1, keepdim=True).clamp(min=0.1)
-            drone_offset  = drone_pos - gate_centers
-            along         = (drone_offset * gate_to_gate_unit).sum(dim=1, keepdim=True)
-            lateral       = drone_offset - along * gate_to_gate_unit
-            lateral_dist  = torch.norm(lateral, dim=1)
-            between_gates = (along.squeeze(1) > 0.0) & \
-                            (along.squeeze(1) < torch.norm(gate_to_gate, dim=1))
-
-            line_penalty = -lateral_dist * between_gates.float() * \
-                        in_normal_segment.float() * \
-                        self.env.rew.get('line_deviation_penalty_scale', 1.5)
-
-            # Curriculum speed threshold — replaces flat velocity reward on normal segments
-            # Stage increases every 200 iterations: 3.0 → 3.5 → 4.0 → ... → 6.0 m/s
             base_threshold      = 4.0
             threshold_increment = 0.8
             stage               = min(self.env.iteration // 200, 8)
@@ -812,31 +774,46 @@ class DefaultQuadcopterStrategy:
             speed_ramp_iters       = 200
 
             if self.env.iteration < speed_curriculum_start:
-                threshold_reward    = torch.zeros(self.num_envs, device=self.device)
-                velocity_reward_normal = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
+                threshold_reward = torch.zeros(self.num_envs, device=self.device)
             else:
-                ramp          = min((self.env.iteration - speed_curriculum_start) / speed_ramp_iters, 1.0)
-                speed_above   = (speed - current_threshold).clamp(min=0.0)
+                ramp             = min((self.env.iteration - speed_curriculum_start) / speed_ramp_iters, 1.0)
+                speed_above      = (speed - current_threshold).clamp(min=0.0)
                 threshold_reward = speed_above * self.env.rew.get('speed_threshold_scale', 6.0) \
                                 * in_normal_segment.float() * ramp
-                velocity_reward_normal = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
 
-            # Combine arc vs normal — normal now gets velocity_toward_gate back
-            velocity_reward = torch.where(in_arc_segment, velocity_reward_arc, velocity_reward_normal)
+            velocity_reward_normal = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
+
+            # --- COMBINE (single, authoritative) ---
+            velocity_reward      = torch.where(in_arc_segment, velocity_reward_arc,  velocity_reward_normal)
+            speed_crossing_bonus = torch.where(in_arc_segment, speed_crossing_arc,   speed_crossing_normal)
+
+            # Line deviation — normal segments only, inside gate corridor
+            drone_pos         = self.env._robot.data.root_link_pos_w
+            gate_to_gate      = next_gate_centers - gate_centers
+            gate_to_gate_unit = gate_to_gate / torch.norm(gate_to_gate, dim=1, keepdim=True).clamp(min=0.1)
+            drone_offset      = drone_pos - gate_centers
+            along             = (drone_offset * gate_to_gate_unit).sum(dim=1, keepdim=True)
+            lateral           = drone_offset - along * gate_to_gate_unit
+            lateral_dist      = torch.norm(lateral, dim=1)
+            between_gates     = (along.squeeze(1) > 0.0) & \
+                                (along.squeeze(1) < torch.norm(gate_to_gate, dim=1))
+            line_penalty      = -lateral_dist * between_gates.float() * \
+                                in_normal_segment.float() * \
+                                self.env.rew.get('line_deviation_penalty_scale', 0.0)
 
             rewards = {
                 "progress_goal":          progress_reward,
                 "target_reached_bonus":   gate_reward_scaled,
                 "lap_incomplete_penalty": lap_penalty,
-                "velocity_toward_gate":   velocity_reward,       # arc + normal
-                "speed_threshold":        threshold_reward,      # normal only, curriculum gated
+                "velocity_toward_gate":   velocity_reward,
+                "speed_threshold":        threshold_reward,
                 "speed_at_crossing":      speed_crossing_bonus,
                 "arc_altitude":           altitude_reward_arc,
                 "three_lap_time_bonus":   time_bonus,
+                "line_deviation":         line_penalty,
             }
 
-
-            # Sum without time_bonus so we can restore it after death override
+            # Single reward computation — no duplicate
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0) - time_bonus
 
             for key, value in rewards.items():
@@ -846,21 +823,10 @@ class DefaultQuadcopterStrategy:
                                 torch.ones_like(reward) * self.env.rew['death_cost'],
                                 reward)
             reward = reward + time_bonus
-            # Sum without time_bonus so we can add it back after death override
-            reward = torch.sum(torch.stack(list(rewards.values())), dim=0) - time_bonus
 
-            for key, value in rewards.items():
-                self._episode_sums[key] += value
-
-            # Death override — lap bonus always paid regardless
-            reward = torch.where(self.env.reset_terminated,
-                                torch.ones_like(reward) * self.env.rew['death_cost'],
-                                reward)
-            reward = reward + time_bonus
         else:
-            # eval mode no rewards
             reward = torch.zeros(self.num_envs, device=self.device)
-        
+
         return reward
     
 

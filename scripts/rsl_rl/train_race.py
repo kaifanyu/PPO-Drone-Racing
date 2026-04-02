@@ -155,8 +155,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'target_reached_bonus_reward_scale':   700.0,
         'death_cost':                         -500.0,
         'lap_incomplete_penalty_reward_scale': -0.5,
-        'velocity_toward_gate_reward_scale':   10.0,
-        'speed_at_crossing_reward_scale':      50.0,   # slight bump — main speed signal
+        'velocity_toward_gate_reward_scale':   20.0,
+        'speed_at_crossing_reward_scale':      8.0,   # slight bump — main speed signal
         'speed_threshold_scale':               15.0,   # main normal segment signal
         'three_lap_time_bonus':              3000.0,   # must be here or it won't apply
         'arc_velocity_scale':   3.0,   # weak — just guide, don't push
