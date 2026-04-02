@@ -762,7 +762,6 @@ class DefaultQuadcopterStrategy:
             velocity_reward      = torch.where(in_arc_segment, velocity_reward_arc,   velocity_reward_normal)
             speed_crossing_bonus = torch.where(in_arc_segment, speed_crossing_arc,    speed_crossing_normal)
 
-
             rewards = {
                 "progress_goal":          progress_reward,
                 "target_reached_bonus":   gate_reward_scaled,
