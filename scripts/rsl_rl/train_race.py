@@ -160,16 +160,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 
     rewards = {
-        'progress_goal_reward_scale':           10.0,   # reduce — just a shaping signal
-        'target_reached_bonus_reward_scale':    700.0,  # keep — must thread gates
-        'death_cost':                           -50.0,  # drastically reduce — dying is acceptable
-        'lap_incomplete_penalty_reward_scale':   0.0,   # remove — irrelevant noise
-        'wrong_direction_penalty':               0.0,   # remove — doesn't affect speed
-        'velocity_toward_gate_reward_scale':    10.0,   # up — dense speed signal every step
-        'speed_at_crossing_reward_scale':      300.0,   # up from 120 — main speed driver
-        'speed_threshold_scale':                 8.0,   # up — reward going fast
-        'line_deviation_penalty_scale':          0.0,   # remove — wide arcs are fine
-        'three_lap_time_bonus':              10000.0,   # up from 3000 — this is the primary objective
+        'progress_goal_reward_scale':           10.0,
+        'target_reached_bonus_reward_scale':    700.0,
+        'death_cost':                          -100.0,  # slightly higher than -50 — virtual gate adds crash risk
+        'lap_incomplete_penalty_reward_scale':   0.0,   # keep off — irrelevant at this stage
+        'wrong_direction_penalty':            -100.0,   # bring back — virtual gate can be crossed backward
+        'velocity_toward_gate_reward_scale':    10.0,   # fine — arc suppression in code prevents wide arc reward
+        'speed_at_crossing_reward_scale':      400.0,   # up from 300 — crossing speed is the main driver
+        'speed_threshold_scale':                 5.0,   # keep moderate — alignment-gated so safe
+        'line_deviation_penalty_scale':          3.0,   # bring back — code suppresses it during arc automatically
+        'three_lap_time_bonus':              20000.0,   # dominant signal — finishing fast must pay most
     }
 
     
