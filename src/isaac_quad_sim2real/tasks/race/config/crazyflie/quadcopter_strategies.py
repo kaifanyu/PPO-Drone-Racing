@@ -677,92 +677,59 @@ class DefaultQuadcopterStrategy:
         prev_gate_quat = self.env._waypoints_quat[prev_gate_indices, :]
         current_pose_prev_gate, _ = subtract_frame_transforms(prev_gate_pos, prev_gate_quat, self.env._robot.data.root_link_pos_w)
 
-        # compute for wrong direction
-        prev_gate_crossed_backward = (
-            (self._prev_pose_drone_wrt_prev_gate[:, 0] < 0.0) &
-            (current_pose_prev_gate[:, 0] >= 0.0) &
-            (torch.abs(current_pose_prev_gate[:, 1]) <= expanded_half) &
-            (torch.abs(current_pose_prev_gate[:, 2]) <= expanded_half)
-        )
-
         # store for next timestep
         self._prev_pose_drone_wrt_prev_gate = current_pose_prev_gate.clone()
-        
-
-
-        
-
-
         if self.cfg.is_train:
-            # Scale each reward 
-            progress_reward = progress * self.env.rew['progress_goal_reward_scale']
+            progress_reward    = progress * self.env.rew['progress_goal_reward_scale']
             gate_reward_scaled = gate_reward * self.env.rew['target_reached_bonus_reward_scale']
-            
-            # Lap incomplete penalty per-step until 3
-            laps_completed = self.env._n_gates_passed // num_gates
-            lap_penalty = (self.env.rew['lap_incomplete_penalty_reward_scale'] * (laps_completed < 3).float())
-            
-            # ---- ADD THESE LINES ----
-            # Reward velocity component pointing directly at current gate center.
-            # Clamped to 0 so flying away from a gate is not double-penalized here.
-            vel_w = self.env._robot.data.root_com_lin_vel_w
-            # Replace your current velocity reward block with this
+
+            laps_completed = self.env._n_gates_passed // num_gates  # single definition
+            lap_penalty    = self.env.rew['lap_incomplete_penalty_reward_scale'] * (laps_completed < 3).float()
+
+            vel_w           = self.env._robot.data.root_com_lin_vel_w
             next_gate_centers = self.env._waypoints[next_gate_indices, :3]
 
-            gate_dir = gate_centers - self.env._robot.data.root_link_pos_w
+            gate_dir      = gate_centers - self.env._robot.data.root_link_pos_w
             next_gate_dir = next_gate_centers - self.env._robot.data.root_link_pos_w
-
-            gate_dist = torch.norm(gate_dir, dim=1, keepdim=True).clamp(min=0.1)
+            gate_dist      = torch.norm(gate_dir,      dim=1, keepdim=True).clamp(min=0.1)
             next_gate_dist = torch.norm(next_gate_dir, dim=1, keepdim=True).clamp(min=0.1)
-
-            gate_dir_unit = gate_dir / gate_dist
+            gate_dir_unit      = gate_dir      / gate_dist
             next_gate_dir_unit = next_gate_dir / next_gate_dist
 
-            # 80% toward current gate, 20% toward next — tightens corner anticipation
-            blended_dir = 0.6 * gate_dir_unit + 0.4 * next_gate_dir_unit
-            blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
+            blended_dir    = 0.6 * gate_dir_unit + 0.4 * next_gate_dir_unit
+            blended_dir    = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
+            vel_toward_gate   = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
+            velocity_reward   = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
 
-            vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
-            velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
-
-            crossing_speed = torch.norm(vel_w, dim=1)
+            crossing_speed        = torch.norm(vel_w, dim=1)
             speed_at_crossing_bonus = gate_passed.float() * crossing_speed * self.env.rew['speed_at_crossing_reward_scale']
-            # Aggregate all components
 
-            # Lap completion detection
-            num_gates = self.env._waypoints.shape[0]
-            laps_completed = self.env._n_gates_passed // num_gates
-            prev_laps = (self.env._n_gates_passed - gate_passed.int()) // num_gates
+            prev_laps           = (self.env._n_gates_passed - gate_passed.int()) // num_gates
             just_finished_3_laps = (laps_completed >= 3) & (prev_laps < 3)
-
-            # Time bonus — budget based on realistic episode length, always pays something
-            max_bonus = 3000.0
-            step_budget = 1800
-            steps_taken = self.env.episode_length_buf.float()
-            time_bonus = (max_bonus * (0.1 + 0.9 * (1.0 - (steps_taken / step_budget).clamp(0.0, 1.0)))) \
+            steps_taken         = self.env.episode_length_buf.float()
+            time_bonus = (3000.0 * (0.1 + 0.9 * (1.0 - (steps_taken / 1800).clamp(0.0, 1.0)))) \
                         * just_finished_3_laps.float()
 
             rewards = {
-                "progress_goal":        progress_reward,
-                "target_reached_bonus": gate_reward_scaled,
+                "progress_goal":          progress_reward,
+                "target_reached_bonus":   gate_reward_scaled,
                 "lap_incomplete_penalty": lap_penalty,
-                "velocity_toward_gate": velocity_reward,
-                "speed_at_crossing":    speed_at_crossing_bonus,
-                "three_lap_time_bonus": time_bonus,
+                "velocity_toward_gate":   velocity_reward,
+                "speed_at_crossing":      speed_at_crossing_bonus,
+                "three_lap_time_bonus":   time_bonus,
             }
 
-            reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
+            # Sum without time_bonus so we can add it back after death override
+            reward = torch.sum(torch.stack(list(rewards.values())), dim=0) - time_bonus
 
-            # Track episode sums (once only)
             for key, value in rewards.items():
                 self._episode_sums[key] += value
 
-            # Death override — but preserve lap bonus
-            lap_bonus_saved = time_bonus.clone()
+            # Death override — lap bonus always paid regardless
             reward = torch.where(self.env.reset_terminated,
                                 torch.ones_like(reward) * self.env.rew['death_cost'],
                                 reward)
-            reward = reward + lap_bonus_saved
+            reward = reward + time_bonus
         else:
             # eval mode no rewards
             reward = torch.zeros(self.num_envs, device=self.device)
