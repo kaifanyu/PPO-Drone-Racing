@@ -68,19 +68,38 @@ class ResetBuffer:
         ang_vel: torch.Tensor,
         motor_speeds: torch.Tensor
     ):
-        """ Store a state in the buffer for a specific gate."""
-        write_idx = self._indices[gate_id].item()
-        
+        """Store a state, keeping only the fastest crossings (top-k by speed).
+
+        While the buffer has empty slots, fill greedily. Once full, only
+        replace the slowest stored entry if the new crossing is faster.
+        This biases resets toward high-speed states the policy has achieved.
+        """
+        speed = torch.norm(lin_vel).item()
+        count = self._counts[gate_id].item()
+
+        if count < self.buffer_size:
+            # Buffer not full yet — just append
+            write_idx = self._indices[gate_id].item()
+        else:
+            # Buffer full — find the slowest stored entry
+            stored_speeds = torch.norm(
+                self._buffer[gate_id, :, 3:6], dim=1
+            )  # [buffer_size]
+            min_speed, write_idx_tensor = stored_speeds.min(dim=0)
+            if speed <= min_speed.item():
+                return  # New crossing is slower than worst stored — skip
+            write_idx = write_idx_tensor.item()
+
         self._buffer[gate_id, write_idx, 0:3] = pos
         self._buffer[gate_id, write_idx, 3:6] = lin_vel
         self._buffer[gate_id, write_idx, 6:10] = quat
         self._buffer[gate_id, write_idx, 10:13] = ang_vel
         self._buffer[gate_id, write_idx, 13:17] = motor_speeds
-        
-        # Update circular buffer index
-        self._indices[gate_id] = (write_idx + 1) % self.buffer_size
-        # Update count (saturate at buffer size)
-        self._counts[gate_id] = min(self._counts[gate_id] + 1, self.buffer_size)
+
+        if count < self.buffer_size:
+            # Only advance circular index while filling
+            self._indices[gate_id] = (write_idx + 1) % self.buffer_size
+            self._counts[gate_id] = count + 1
     
     def get_count(self, gate_id: int) -> int:
         """Get the number of stored states for a gate."""
@@ -699,7 +718,7 @@ class DefaultQuadcopterStrategy:
 
             # Write once
             self.env.extras["log"] = extras
-            
+
         # Call robot reset first
         self.env._robot.reset(env_ids_tensor)
 
