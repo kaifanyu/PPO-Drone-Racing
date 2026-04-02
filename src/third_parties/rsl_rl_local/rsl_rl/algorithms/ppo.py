@@ -323,16 +323,16 @@ def _get_activation(name: str) -> type:
 
 class PPO:
     """Proximal Policy Optimization algorithm (https://arxiv.org/abs/1707.06347)."""
-    actor_critic = ActorCriticLSTM(
-        num_actor_obs=48,        # your obs dim
-        num_critic_obs=48,       # can differ if using privileged obs
-        num_actions=12,          # your action dim
-        lstm_hidden_size=256,
-        lstm_num_layers=1,
-        actor_hidden_dims=[128, 64],
-        critic_hidden_dims=[128, 64],
-    )
-    # actor_critic: ActorCritic
+    # actor_critic = ActorCriticLSTM(
+    #     num_actor_obs=48,        # your obs dim
+    #     num_critic_obs=48,       # can differ if using privileged obs
+    #     num_actions=12,          # your action dim
+    #     lstm_hidden_size=256,
+    #     lstm_num_layers=1,
+    #     actor_hidden_dims=[128, 64],
+    #     critic_hidden_dims=[128, 64],
+    # )
+    actor_critic: ActorCritic
     """The actor critic module."""
 
     def __init__(
