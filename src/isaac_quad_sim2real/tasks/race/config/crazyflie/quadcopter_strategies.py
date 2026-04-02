@@ -734,8 +734,8 @@ class DefaultQuadcopterStrategy:
             # Only blend toward next gate when within 2m of current gate
             # Far away = 100% toward current gate (direct line)
             # Close    = up to 30% toward next gate (late apex)
-            transition_radius = 1.3   # meters — start anticipating next gate here
-            next_gate_weight = (1.0 - (gate_dist.squeeze(1) / transition_radius).clamp(0.0, 1.0)) * 0.3
+            transition_radius = 3.5   # meters — start anticipating next gate here
+            next_gate_weight = (1.0 - (gate_dist.squeeze(1) / transition_radius).clamp(0.0, 1.0)) * 0.6 # Allow up to 60% bias towards the next gate
             curr_gate_weight = 1.0 - next_gate_weight
 
             blended_dir = (curr_gate_weight.unsqueeze(1) * gate_dir_unit + 
@@ -803,9 +803,9 @@ class DefaultQuadcopterStrategy:
 
             # Curriculum speed threshold — replaces flat velocity reward on normal segments
             # Stage increases every 200 iterations: 3.0 → 3.5 → 4.0 → ... → 6.0 m/s
-            base_threshold      = 3.0
-            threshold_increment = 0.5
-            stage               = min(self.env.iteration // 200, 6)
+            base_threshold      = 4.0
+            threshold_increment = 0.8
+            stage               = min(self.env.iteration // 200, 8)
             current_threshold   = base_threshold + stage * threshold_increment
             speed               = torch.norm(vel_w, dim=1)
             speed_curriculum_start = 400
@@ -835,7 +835,7 @@ class DefaultQuadcopterStrategy:
                 "three_lap_time_bonus":   time_bonus,
             }
 
-            
+
             # Sum without time_bonus so we can restore it after death override
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0) - time_bonus
 
