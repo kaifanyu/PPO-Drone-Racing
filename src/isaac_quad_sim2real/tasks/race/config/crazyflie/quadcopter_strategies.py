@@ -195,7 +195,7 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["speed_at_crossing", "three_lap_time_bonus", "arc_altitude"]  # adds extra backwards_crossing key 
+            extra_keys = ["speed_at_crossing", "three_lap_time_bonus", "arc_altitude", "line_deviation"]  # adds extra backwards_crossing key 
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -710,7 +710,7 @@ class DefaultQuadcopterStrategy:
             # Only blend toward next gate when within 2m of current gate
             # Far away = 100% toward current gate (direct line)
             # Close    = up to 30% toward next gate (late apex)
-            transition_radius = 2.0   # meters — start anticipating next gate here
+            transition_radius = 1.3   # meters — start anticipating next gate here
             next_gate_weight = (1.0 - (gate_dist.squeeze(1) / transition_radius).clamp(0.0, 1.0)) * 0.3
             curr_gate_weight = 1.0 - next_gate_weight
 
@@ -762,6 +762,22 @@ class DefaultQuadcopterStrategy:
             velocity_reward      = torch.where(in_arc_segment, velocity_reward_arc,   velocity_reward_normal)
             speed_crossing_bonus = torch.where(in_arc_segment, speed_crossing_arc,    speed_crossing_normal)
 
+            drone_pos     = self.env._robot.data.root_link_pos_w
+            gate_to_gate  = next_gate_centers - gate_centers
+            gate_to_gate_unit = gate_to_gate / torch.norm(gate_to_gate, dim=1, keepdim=True).clamp(min=0.1)
+            drone_offset  = drone_pos - gate_centers
+            along         = (drone_offset * gate_to_gate_unit).sum(dim=1, keepdim=True)
+            lateral       = drone_offset - along * gate_to_gate_unit
+            lateral_dist  = torch.norm(lateral, dim=1)
+
+            between_gates = (along.squeeze(1) > 0.0) & \
+                            (along.squeeze(1) < torch.norm(gate_to_gate, dim=1))
+
+            # Only penalize on normal segments — arc needs freedom to deviate
+            line_penalty = -lateral_dist * between_gates.float() * \
+                        in_normal_segment.float() * \
+                        self.env.rew.get('line_deviation_penalty_scale', 1.5)
+            
             rewards = {
                 "progress_goal":          progress_reward,
                 "target_reached_bonus":   gate_reward_scaled,
@@ -770,6 +786,7 @@ class DefaultQuadcopterStrategy:
                 "speed_at_crossing":      speed_crossing_bonus,
                 "arc_altitude":           altitude_reward_arc,   # new — only fires during arc
                 "three_lap_time_bonus":   time_bonus,
+                "line_deviation": line_penalty,
             }
 
             # Sum without time_bonus so we can add it back after death override
@@ -1160,11 +1177,3 @@ class DefaultQuadcopterStrategy:
         self._prev_distance_to_gate[env_ids_tensor] = torch.norm(drone_pos - gate_pos, dim=1)
 
         self.env._crashed[env_ids_tensor] = 0
-        
-        if self.cfg.is_train and hasattr(self, '_episode_sums'):
-            # Print total reward budget breakdown at reset time
-            total_ep_reward = sum(v[env_ids_tensor].mean().item() for v in self._episode_sums.values())
-            ep_len = self.env.episode_length_buf[env_ids_tensor].float().mean().item()
-            gates = self.env._n_gates_passed[env_ids_tensor].float().mean().item()
-            print(f"[EPISODE_DEBUG] ep_len={ep_len:.0f} gates={gates:.1f} total_reward={total_ep_reward:.0f} "
-                f"reward_per_step={total_ep_reward/max(ep_len,1):.2f}")

@@ -161,6 +161,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'three_lap_time_bonus':              3000.0,   # must be here or it won't apply
         'arc_velocity_scale':   3.0,   # weak — just guide, don't push
         'arc_altitude_scale':   5.0,   # reward correct height during loop
+        'line_deviation_penalty_scale':         1.5,  # uncomment but start gentle
     }
 
     env_cfg.is_train = True
