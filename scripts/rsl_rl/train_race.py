@@ -160,16 +160,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 
     rewards = {
-        'progress_goal_reward_scale':           30.0,
-        'target_reached_bonus_reward_scale':    700.0,
-        'death_cost':                          -300.0,   # reduce — fear of death causes conservative flight
-        'lap_incomplete_penalty_reward_scale':  -0.05,
-        'wrong_direction_penalty':             -200.0,
-        'velocity_toward_gate_reward_scale':     5.0,   # up from 3.0 — more incentive to move fast toward gate
-        'speed_at_crossing_reward_scale':      120.0,   # up from 60 — directly rewards fast gate crossings
-        'speed_threshold_scale':                 3.0,   # keep low since it's gated on alignment now
-        'line_deviation_penalty_scale':          3.0,   # keep tight lines at higher speed
-        'three_lap_time_bonus':               5000.0,   # up from 3000 — bigger payoff for finishing fast
+        'progress_goal_reward_scale':           10.0,   # reduce — just a shaping signal
+        'target_reached_bonus_reward_scale':    700.0,  # keep — must thread gates
+        'death_cost':                           -50.0,  # drastically reduce — dying is acceptable
+        'lap_incomplete_penalty_reward_scale':   0.0,   # remove — irrelevant noise
+        'wrong_direction_penalty':               0.0,   # remove — doesn't affect speed
+        'velocity_toward_gate_reward_scale':    10.0,   # up — dense speed signal every step
+        'speed_at_crossing_reward_scale':      300.0,   # up from 120 — main speed driver
+        'speed_threshold_scale':                 8.0,   # up — reward going fast
+        'line_deviation_penalty_scale':          0.0,   # remove — wide arcs are fine
+        'three_lap_time_bonus':              10000.0,   # up from 3000 — this is the primary objective
     }
 
     

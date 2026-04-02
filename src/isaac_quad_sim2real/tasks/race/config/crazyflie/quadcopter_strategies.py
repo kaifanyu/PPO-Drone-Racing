@@ -650,7 +650,6 @@ class DefaultQuadcopterStrategy:
             }
 
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0) - time_bonus
-            reward = reward.clamp(-300.0, 300.0)   # ADD THIS
 
             
             for key, value in rewards.items():
