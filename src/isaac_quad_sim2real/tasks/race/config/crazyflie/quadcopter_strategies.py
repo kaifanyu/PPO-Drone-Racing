@@ -729,37 +729,40 @@ class DefaultQuadcopterStrategy:
             speed_at_crossing_bonus = gate_passed.float() * crossing_speed * self.env.rew['speed_at_crossing_reward_scale']
             # Aggregate all components
 
-
-
+            # Lap completion detection
             num_gates = self.env._waypoints.shape[0]
             laps_completed = self.env._n_gates_passed // num_gates
-            prev_laps = (self.env._n_gates_passed - gate_passed.int()) // num_gates  # laps before this step
-
+            prev_laps = (self.env._n_gates_passed - gate_passed.int()) // num_gates
             just_finished_3_laps = (laps_completed >= 3) & (prev_laps < 3)
-            max_bonus = 3000.0
-            step_budget = 750   # 15 seconds * 50 Hz
-            steps_taken = self.env.episode_length_buf.float()
-            time_bonus = (max_bonus * (1.0 - (steps_taken / step_budget).clamp(0.0, 1.0))) * just_finished_3_laps.float()
 
-            self._episode_sums["three_lap_time_bonus"] += time_bonus
+            # Time bonus — budget based on realistic episode length, always pays something
+            max_bonus = 3000.0
+            step_budget = 1800
+            steps_taken = self.env.episode_length_buf.float()
+            time_bonus = (max_bonus * (0.1 + 0.9 * (1.0 - (steps_taken / step_budget).clamp(0.0, 1.0)))) \
+                        * just_finished_3_laps.float()
+
             rewards = {
-                "progress_goal": progress_reward,
+                "progress_goal":        progress_reward,
                 "target_reached_bonus": gate_reward_scaled,
                 "lap_incomplete_penalty": lap_penalty,
-                # "roll_pitch_rates": roll_pitch_rates_penalty,
-                # "yaw_rate": yaw_rate_penalty,
-                "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
-                "speed_at_crossing": speed_at_crossing_bonus,
+                "velocity_toward_gate": velocity_reward,
+                "speed_at_crossing":    speed_at_crossing_bonus,
                 "three_lap_time_bonus": time_bonus,
             }
+
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
-            
-            # Track what the agent earned in each component
+
+            # Track episode sums (once only)
             for key, value in rewards.items():
                 self._episode_sums[key] += value
-            
-            # overrid all rewards when death
-            reward = torch.where(self.env.reset_terminated, torch.ones_like(reward) * self.env.rew['death_cost'],reward)
+
+            # Death override — but preserve lap bonus
+            lap_bonus_saved = time_bonus.clone()
+            reward = torch.where(self.env.reset_terminated,
+                                torch.ones_like(reward) * self.env.rew['death_cost'],
+                                reward)
+            reward = reward + lap_bonus_saved
         else:
             # eval mode no rewards
             reward = torch.zeros(self.num_envs, device=self.device)
