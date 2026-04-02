@@ -159,6 +159,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'speed_at_crossing_reward_scale':      25.0,   # slight bump — main speed signal
         # 'line_deviation_penalty_scale':         2.0,   # new — keeps line tight
         'three_lap_time_bonus':              3000.0,   # must be here or it won't apply
+        'arc_velocity_scale':   3.0,   # weak — just guide, don't push
+        'arc_altitude_scale':   5.0,   # reward correct height during loop
     }
 
     env_cfg.is_train = True

@@ -195,7 +195,7 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["speed_at_crossing", "three_lap_time_bonus"]  # adds extra backwards_crossing key 
+            extra_keys = ["speed_at_crossing", "three_lap_time_bonus", "arc_altitude"]  # adds extra backwards_crossing key 
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -677,6 +677,14 @@ class DefaultQuadcopterStrategy:
         prev_gate_quat = self.env._waypoints_quat[prev_gate_indices, :]
         current_pose_prev_gate, _ = subtract_frame_transforms(prev_gate_pos, prev_gate_quat, self.env._robot.data.root_link_pos_w)
 
+
+        ARC_GATE_INDICES = {3, 4}  # virtual gate (idx 3) and loop gate (idx 4)
+        in_arc_segment = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        for g in ARC_GATE_INDICES:
+            in_arc_segment |= (self.env._idx_wp == g)
+        in_normal_segment = ~in_arc_segment
+
+
         # store for next timestep
         self._prev_pose_drone_wrt_prev_gate = current_pose_prev_gate.clone()
         if self.cfg.is_train:
@@ -711,7 +719,6 @@ class DefaultQuadcopterStrategy:
             blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
 
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
-            velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
 
             crossing_speed        = torch.norm(vel_w, dim=1)
             speed_at_crossing_bonus = gate_passed.float() * crossing_speed * self.env.rew['speed_at_crossing_reward_scale']
@@ -722,12 +729,47 @@ class DefaultQuadcopterStrategy:
             time_bonus = (3000.0 * (0.1 + 0.9 * (1.0 - (steps_taken / 1800).clamp(0.0, 1.0)))) \
                         * just_finished_3_laps.float()
 
+            # --- NORMAL SEGMENT REWARDS (gates 0,1,2,5,6,7) ---
+            # Full speed incentives, blended direction, speed at crossing
+            velocity_reward_normal = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
+            speed_crossing_normal  = gate_passed.float() * crossing_speed * self.env.rew['speed_at_crossing_reward_scale']
+
+            # --- ARC SEGMENT REWARDS (virtual gate + gate 4) ---
+            # No speed reward — just guide through the arc precisely
+            # Use pure gate-direction with NO next-gate blend
+            arc_gate_dir      = gate_centers - self.env._robot.data.root_link_pos_w
+            arc_gate_dist     = torch.norm(arc_gate_dir, dim=1, keepdim=True).clamp(min=0.1)
+            arc_gate_dir_unit = arc_gate_dir / arc_gate_dist
+            vel_toward_arc    = (vel_w * arc_gate_dir_unit).sum(dim=1).clamp(min=0.0)
+
+            # Weaker velocity scale — guide not push
+            velocity_reward_arc   = vel_toward_arc * self.env.rew.get('arc_velocity_scale', 3.0)
+            # No speed_at_crossing bonus for arc gates — don't incentivize blasting through
+            speed_crossing_arc    = torch.zeros(self.num_envs, device=self.device)
+
+            # Altitude reward — bonus for being at the right height during arc
+            # Virtual gate is at z=1.5, gate 4 at z=0.75
+            target_z = torch.where(
+                self.env._idx_wp == self._virtual_gate_index,
+                torch.full((self.num_envs,), 1.5, device=self.device),
+                torch.full((self.num_envs,), 0.75, device=self.device)
+            )
+            z_error = torch.abs(self.env._robot.data.root_link_pos_w[:, 2] - target_z)
+            altitude_reward_arc = torch.exp(-z_error * 2.0) * self.env.rew.get('arc_altitude_scale', 5.0)
+            altitude_reward_arc = altitude_reward_arc * in_arc_segment.float()
+
+            # --- COMBINE --- 
+            velocity_reward      = torch.where(in_arc_segment, velocity_reward_arc,   velocity_reward_normal)
+            speed_crossing_bonus = torch.where(in_arc_segment, speed_crossing_arc,    speed_crossing_normal)
+
+
             rewards = {
                 "progress_goal":          progress_reward,
                 "target_reached_bonus":   gate_reward_scaled,
                 "lap_incomplete_penalty": lap_penalty,
                 "velocity_toward_gate":   velocity_reward,
-                "speed_at_crossing":      speed_at_crossing_bonus,
+                "speed_at_crossing":      speed_crossing_bonus,
+                "arc_altitude":           altitude_reward_arc,   # new — only fires during arc
                 "three_lap_time_bonus":   time_bonus,
             }
 
