@@ -195,7 +195,7 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["backward_crossing", "crossing_speed_bonus"]  # adds extra backwards_crossing key 
+            extra_keys = ["backward_crossing", "speed_reward", "crossing_speed_bonus"]  # adds extra backwards_crossing key 
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -243,7 +243,7 @@ class DefaultQuadcopterStrategy:
         num_gates = len(env._waypoints) if hasattr(env, '_waypoints') else 6
         noise_std = {
             'pos': 0.3,           # Position noise (m)
-            'lin_vel': 0.3,       # Linear velocity noise (m/s)
+            'lin_vel': 0.15,       # Linear velocity noise (m/s)
             'quat': 0.15,         # Orientation noise as yaw (rad)
             'ang_vel': 0.1,       # Angular velocity noise (rad/s)
             'motor_speeds': 50.0  # Motor speed noise (rad/s)
@@ -592,6 +592,11 @@ class DefaultQuadcopterStrategy:
             # Reward speed at the moment of passing — only fires on crossing timestep
             crossing_speed_bonus = gate_passed.float() * crossing_speed * self.env.rew['crossing_speed_reward_scale']
 
+            # In get_rewards(), add this component:
+            speed = torch.norm(self.env._robot.data.root_com_lin_vel_w, dim=1)
+            min_speed_threshold = 3.0   # m/s — don't reward hovering
+            speed_bonus = torch.clamp(speed - min_speed_threshold, min=0.0)
+            speed_reward = speed_bonus * self.env.rew['speed_reward_scale']
 
             # Aggregate all components
             rewards = {
@@ -602,7 +607,8 @@ class DefaultQuadcopterStrategy:
                 "yaw_rate": yaw_rate_penalty,
                 "backward_crossing": backward_penalty,
                 "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
-                "crossing_speed_bonus": crossing_speed_bonus
+                "crossing_speed_bonus": crossing_speed_bonus,
+                "speed_reward": speed_reward
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             
