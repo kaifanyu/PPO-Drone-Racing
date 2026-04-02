@@ -807,42 +807,35 @@ class DefaultQuadcopterStrategy:
             threshold_increment = 0.5
             stage               = min(self.env.iteration // 200, 6)
             current_threshold   = base_threshold + stage * threshold_increment
-
-            speed       = torch.norm(vel_w, dim=1)
-            speed_above = (speed - current_threshold).clamp(min=0.0)
-
-
-            speed_curriculum_start = 400  # don't push speed until drone can fly
-            speed_ramp_iters = 200        # ramp from 0 to full over 200 iters
+            speed               = torch.norm(vel_w, dim=1)
+            speed_curriculum_start = 400
+            speed_ramp_iters       = 200
 
             if self.env.iteration < speed_curriculum_start:
-                threshold_reward = torch.zeros(self.num_envs, device=self.device)
+                threshold_reward    = torch.zeros(self.num_envs, device=self.device)
+                velocity_reward_normal = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
             else:
-                ramp = min((self.env.iteration - speed_curriculum_start) / speed_ramp_iters, 1.0)
-                stage = min(self.env.iteration // 200, 6)
-                current_threshold = base_threshold + stage * threshold_increment
-                speed_above = (speed - current_threshold).clamp(min=0.0)
-                threshold_reward = speed_above * self.env.rew.get('speed_threshold_scale', 8.0) \
+                ramp          = min((self.env.iteration - speed_curriculum_start) / speed_ramp_iters, 1.0)
+                speed_above   = (speed - current_threshold).clamp(min=0.0)
+                threshold_reward = speed_above * self.env.rew.get('speed_threshold_scale', 6.0) \
                                 * in_normal_segment.float() * ramp
+                velocity_reward_normal = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
 
-
-            # velocity_toward_gate only fires on arc segments now
-            # on normal segments it's replaced by threshold_reward
-            velocity_reward = torch.where(in_arc_segment, velocity_reward_arc,
-                                        torch.zeros_like(velocity_reward_arc))
+            # Combine arc vs normal — normal now gets velocity_toward_gate back
+            velocity_reward = torch.where(in_arc_segment, velocity_reward_arc, velocity_reward_normal)
 
             rewards = {
                 "progress_goal":          progress_reward,
                 "target_reached_bonus":   gate_reward_scaled,
                 "lap_incomplete_penalty": lap_penalty,
-                "velocity_toward_gate":   velocity_reward,       # arc only
-                "speed_threshold":        threshold_reward,      # normal segments only
+                "velocity_toward_gate":   velocity_reward,       # arc + normal
+                "speed_threshold":        threshold_reward,      # normal only, curriculum gated
                 "speed_at_crossing":      speed_crossing_bonus,
                 "arc_altitude":           altitude_reward_arc,
                 "three_lap_time_bonus":   time_bonus,
-                "line_deviation":         line_penalty,
             }
 
+            
             # Sum without time_bonus so we can restore it after death override
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0) - time_bonus
 
