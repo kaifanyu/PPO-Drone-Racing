@@ -775,8 +775,19 @@ class DefaultQuadcopterStrategy:
         quat = torch.zeros(n_reset, 4, device=self.device)
         ang_vel = torch.zeros(n_reset, 3, device=self.device)
         motor_speeds = torch.zeros(n_reset, 4, device=self.device)
-        waypoint_indices = start_indices.clone()
-        
+        # Force close spawn to gate 0 for first 400 iterations
+        if self.env.iteration < 400:
+            start_indices[:] = self.env._initial_wp
+            spawn_before_min_eff     = 0.3
+            spawn_before_max_eff     = 1.5
+            spawn_lateral_expand_eff = 0.3
+        else:
+            spawn_before_min_eff     = self.spawn_before_min
+            spawn_before_max_eff     = self.spawn_before_max
+            spawn_lateral_expand_eff = self.spawn_lateral_expand
+
+        waypoint_indices = start_indices.clone()   # <-- MOVED to after the override
+            
         # After iteration 1000, 10% chance to spawn on ground in front of initial waypoint for recovery
         if self.env.iteration > 1000:
             percent_ground = 0.1  # 10%
@@ -859,13 +870,12 @@ class DefaultQuadcopterStrategy:
                 gate_quat_mat = matrix_from_quat(self.env._waypoints_quat[gate_id].unsqueeze(0))[0]
                 gate_y = gate_quat_mat[:, 1]
                 gate_z = gate_quat_mat[:, 2]
-                
+
                 gate_half = getattr(self.env._gate_model_cfg_data, "gate_side", 1.0) * 0.5
-                lat_half = gate_half * self.spawn_lateral_expand
-                
-                # Sample in front of gate
+                lat_half = gate_half * spawn_lateral_expand_eff    # <-- FIXED
+
                 d = torch.empty(1, device=self.device).uniform_(
-                    self.spawn_before_min, self.spawn_before_max
+                    spawn_before_min_eff, spawn_before_max_eff     # <-- FIXED
                 )
                 off_y = torch.empty(1, device=self.device).uniform_(-lat_half, lat_half)
                 off_z = torch.empty(1, device=self.device).uniform_(-lat_half, lat_half)
