@@ -160,18 +160,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 
     rewards = {
-        'progress_goal_reward_scale':           10.0,
+        'progress_goal_reward_scale':           30.0,
         'target_reached_bonus_reward_scale':    700.0,
-        'death_cost':                          -100.0,  # slightly higher than -50 — virtual gate adds crash risk
-        'lap_incomplete_penalty_reward_scale':   0.0,   # keep off — irrelevant at this stage
-        'wrong_direction_penalty':            -100.0,   # bring back — virtual gate can be crossed backward
-        'velocity_toward_gate_reward_scale':    10.0,   # fine — arc suppression in code prevents wide arc reward
-        'speed_at_crossing_reward_scale':      400.0,   # up from 300 — crossing speed is the main driver
-        'speed_threshold_scale':                 5.0,   # keep moderate — alignment-gated so safe
-        'line_deviation_penalty_scale':          3.0,   # bring back — code suppresses it during arc automatically
-        'three_lap_time_bonus':              20000.0,   # dominant signal — finishing fast must pay most
+        'death_cost':                          -500.0,
+        'lap_incomplete_penalty_reward_scale':  -0.05,
+        'wrong_direction_penalty':             -200.0,
+        'roll_pitch_rates_reward_scale':        -0.1,
+        'yaw_rate_reward_scale':               -0.05,
+        'velocity_toward_gate_reward_scale':    12.0,
+        'speed_at_crossing_reward_scale':       300.0,
+        'speed_threshold_scale':                 5.0,
+        'line_deviation_penalty_scale':          3.0,
+        'three_lap_time_bonus':              20000.0,
     }
-
     
     env_cfg.is_train = True
     env_cfg.rewards = rewards
