@@ -546,7 +546,10 @@ class DefaultQuadcopterStrategy:
             scale_line        = ramp(200, 350)    # was 600→750
             scale_backward    = ramp(200, 350)    # was 600→750
             scale_lap_penalty = ramp(300, 450)    # was 700→850
-            scale_time_bonus  = ramp(400, 550)    # was 800→950
+            scale_speed_cross = ramp(1200, 1250)   # fade in immediately
+            scale_speed_thr   = ramp(1200, 1300)   # fade in over 100 iters
+            scale_time_bonus  = 1.0                # already fully ramped
+            
 
             # ── Core rewards ─────────────────────────────────────────────────────
             progress_reward    = progress * self.env.rew['progress_goal_reward_scale'] * scale_progress
@@ -595,11 +598,15 @@ class DefaultQuadcopterStrategy:
             # ── Curriculum speed threshold ───────────────────────────────────────
             base_threshold      = 3.0
             threshold_increment = 0.5
-            stage               = min(itr // 200, 6)
-            current_threshold   = base_threshold + stage * threshold_increment
+            stage = max(0, min((itr - 1200) // 100, 8))
+            current_threshold = base_threshold + stage * threshold_increment
             speed               = torch.norm(vel_w, dim=1)
-            speed_above         = (speed - current_threshold).clamp(min=0.0)
-            threshold_reward    = speed_above * self.env.rew.get('speed_threshold_scale', 15.0) * scale_speed_thr
+            alignment = (vel_w * gate_dir_unit).sum(dim=1)          # dot product
+            aligned   = (alignment / crossing_speed.clamp(min=0.1)) > 0.5   # cos > 0.5 = within 60 deg
+            speed_above      = (speed - current_threshold).clamp(min=0.0)
+            threshold_reward = speed_above * aligned.float() \
+                             * self.env.rew.get('speed_threshold_scale', 5.0) \
+                             * scale_speed_thr
 
             # ── Line deviation penalty ───────────────────────────────────────────
             gate_to_gate      = next_gate_centers - gate_centers
@@ -756,44 +763,23 @@ class DefaultQuadcopterStrategy:
                 t = (itr - start_itr) / max(end_itr - start_itr, 1)
                 return v_min + (v_max - v_min) * max(0.0, min(1.0, t))
 
-            self.env.extras["log"].update({
-                # Curriculum scale visibility
-                "Curriculum/scale_gate":        ramp(400, 550),
-                "Curriculum/scale_death":       ramp(450, 650),
-                "Curriculum/scale_speed_cross": ramp(500, 650),
-                "Curriculum/scale_speed_thr":   ramp(550, 700),
-                "Curriculum/scale_line":        ramp(600, 750),
-                "Curriculum/scale_backward":    ramp(600, 750),
-                "Curriculum/scale_lap_penalty": ramp(700, 850),
-                "Curriculum/scale_time_bonus":  ramp(800, 950),
-
-                # Episode stats
-                "Episode_Stats/gates_per_episode": self.env._n_gates_passed[env_ids_tensor].float().mean().item(),
-                "Episode_Stats/ep_len":            self.env.episode_length_buf[env_ids_tensor].float().mean().item(),
-                "Episode_Stats/reward_per_step":   (
-                    sum(v[env_ids_tensor].mean().item() for v in self._episode_sums.values())
-                    / max(self.env.episode_length_buf[env_ids_tensor].float().mean().item(), 1)
-                ),
-            })
 
             print(f"[EPISODE_DEBUG] ep_len={ep_len:.0f} gates={gates:.1f} "
                   f"total={total:.0f} per_step={total/ep_len:.2f}")
             print(f"[EPISODE_DEBUG] breakdown: {' | '.join(component_strs)}")
 
-            # Tensorboard logging + zero-out (must happen after debug print)
             extras = dict()
             for key in self._episode_sums.keys():
                 episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids_tensor])
                 extras["Episode_Reward/" + key] = episodic_sum_avg / self.env.max_episode_length_s
-                self._episode_sums[key][env_ids_tensor] = 0.0   # zero AFTER reading
-            
-            self.env.extras["log"] = dict()
-            self.env.extras["log"].update(extras)
-            extras = dict()
+                self._episode_sums[key][env_ids_tensor] = 0.0
+
+            # Add termination stats to the SAME extras dict, not a separate one
             extras["Episode_Termination/died"] = torch.count_nonzero(self.env.reset_terminated[env_ids_tensor]).item()
             extras["Episode_Termination/time_out"] = torch.count_nonzero(self.env.reset_time_outs[env_ids_tensor]).item()
-            self.env.extras["log"].update(extras)
 
+            # Write once
+            self.env.extras["log"] = extras
 
         # Call robot reset first
         self.env._robot.reset(env_ids_tensor)

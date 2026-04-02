@@ -161,15 +161,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     rewards = {
         'progress_goal_reward_scale':           30.0,
-        'target_reached_bonus_reward_scale':    700.0,   # keep — this is correct
-        'death_cost':                          -500.0,
+        'target_reached_bonus_reward_scale':    700.0,
+        'death_cost':                          -300.0,   # reduce — fear of death causes conservative flight
         'lap_incomplete_penalty_reward_scale':  -0.05,
         'wrong_direction_penalty':             -200.0,
-        'velocity_toward_gate_reward_scale':     3.0,   # WAS 10.0 — dominant, cut it
-        'speed_at_crossing_reward_scale':       60.0,   # keep — only fires on gate cross
-        'speed_threshold_scale':                 5.0,   # WAS 15.0 — cut it, paired with vel it's too much
-        'line_deviation_penalty_scale':          1.0,
-        'three_lap_time_bonus':               3000.0,
+        'velocity_toward_gate_reward_scale':     5.0,   # up from 3.0 — more incentive to move fast toward gate
+        'speed_at_crossing_reward_scale':      120.0,   # up from 60 — directly rewards fast gate crossings
+        'speed_threshold_scale':                 3.0,   # keep low since it's gated on alignment now
+        'line_deviation_penalty_scale':          3.0,   # keep tight lines at higher speed
+        'three_lap_time_bonus':               5000.0,   # up from 3000 — bigger payoff for finishing fast
     }
 
     
