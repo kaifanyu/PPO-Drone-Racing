@@ -576,7 +576,8 @@ class DefaultQuadcopterStrategy:
                 
                 
             if not hasattr(self, '_gate_crossing_step'):
-                self._gate_crossing_step = torch.zeros(self.num_envs, self.num_gates, device=self.device)
+                num_gates = self.env._waypoints.shape[0]
+                self._gate_crossing_step = torch.zeros(self.num_envs, num_gates, device=self.device)
 
             self._gate_crossing_step[ids_to_next_gate, current_gate_idx] = \
                 self.env.episode_length_buf[ids_to_next_gate].float()
