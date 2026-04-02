@@ -157,7 +157,21 @@ class ResetBuffer:
     def has_samples(self, gate_id: int) -> bool:
         """Check if a gate has any stored samples."""
         return self._counts[gate_id].item() > 0
-
+    
+    def purge_slow_states(self, min_speed: float):
+        """Remove stored states below min_speed to force faster resets."""
+        for gate_id in range(self.num_gates):
+            count = self._counts[gate_id].item()
+            if count == 0:
+                continue
+            speeds = torch.norm(self._buffer[gate_id, :count, 3:6], dim=1)
+            keep = speeds >= min_speed
+            if keep.sum() == 0:
+                continue  # don't purge if nothing would remain
+            kept_states = self._buffer[gate_id, :count][keep]
+            self._buffer[gate_id, :len(kept_states)] = kept_states
+            self._counts[gate_id] = len(kept_states)
+            self._indices[gate_id] = len(kept_states) % self.buffer_size
 
 class DefaultQuadcopterStrategy:
     """Default strategy for quadcopter racing rewards, observations, and resets.
@@ -195,7 +209,7 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["speed_at_crossing", "three_lap_time_bonus", "arc_altitude", "line_deviation"]  # adds extra backwards_crossing key 
+            extra_keys = ["speed_at_crossing", "three_lap_time_bonus", "arc_altitude", "line_deviation", "speed_threshold"]  # adds extra backwards_crossing key 
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -772,6 +786,7 @@ class DefaultQuadcopterStrategy:
             velocity_reward      = torch.where(in_arc_segment, velocity_reward_arc,   velocity_reward_normal)
             speed_crossing_bonus = torch.where(in_arc_segment, speed_crossing_arc,    speed_crossing_normal)
 
+            # Line deviation — normal segments only
             drone_pos     = self.env._robot.data.root_link_pos_w
             gate_to_gate  = next_gate_centers - gate_centers
             gate_to_gate_unit = gate_to_gate / torch.norm(gate_to_gate, dim=1, keepdim=True).clamp(min=0.1)
@@ -779,26 +794,52 @@ class DefaultQuadcopterStrategy:
             along         = (drone_offset * gate_to_gate_unit).sum(dim=1, keepdim=True)
             lateral       = drone_offset - along * gate_to_gate_unit
             lateral_dist  = torch.norm(lateral, dim=1)
-
             between_gates = (along.squeeze(1) > 0.0) & \
                             (along.squeeze(1) < torch.norm(gate_to_gate, dim=1))
 
-            # Only penalize on normal segments — arc needs freedom to deviate
             line_penalty = -lateral_dist * between_gates.float() * \
                         in_normal_segment.float() * \
                         self.env.rew.get('line_deviation_penalty_scale', 1.5)
-            
+
+            # Curriculum speed threshold — replaces flat velocity reward on normal segments
+            # Stage increases every 200 iterations: 3.0 → 3.5 → 4.0 → ... → 6.0 m/s
+            base_threshold      = 3.0
+            threshold_increment = 0.5
+            stage               = min(self.env.iteration // 200, 6)
+            current_threshold   = base_threshold + stage * threshold_increment
+
+            speed       = torch.norm(vel_w, dim=1)
+            speed_above = (speed - current_threshold).clamp(min=0.0)
+            threshold_reward = speed_above * self.env.rew.get('speed_threshold_scale', 8.0) \
+                            * in_normal_segment.float()
+
+            # velocity_toward_gate only fires on arc segments now
+            # on normal segments it's replaced by threshold_reward
+            velocity_reward = torch.where(in_arc_segment, velocity_reward_arc,
+                                        torch.zeros_like(velocity_reward_arc))
+
             rewards = {
                 "progress_goal":          progress_reward,
                 "target_reached_bonus":   gate_reward_scaled,
                 "lap_incomplete_penalty": lap_penalty,
-                "velocity_toward_gate":   velocity_reward,
+                "velocity_toward_gate":   velocity_reward,       # arc only
+                "speed_threshold":        threshold_reward,      # normal segments only
                 "speed_at_crossing":      speed_crossing_bonus,
-                "arc_altitude":           altitude_reward_arc,   # new — only fires during arc
+                "arc_altitude":           altitude_reward_arc,
                 "three_lap_time_bonus":   time_bonus,
-                "line_deviation": line_penalty,
+                "line_deviation":         line_penalty,
             }
 
+            # Sum without time_bonus so we can restore it after death override
+            reward = torch.sum(torch.stack(list(rewards.values())), dim=0) - time_bonus
+
+            for key, value in rewards.items():
+                self._episode_sums[key] += value
+
+            reward = torch.where(self.env.reset_terminated,
+                                torch.ones_like(reward) * self.env.rew['death_cost'],
+                                reward)
+            reward = reward + time_bonus
             # Sum without time_bonus so we can add it back after death override
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0) - time_bonus
 
@@ -875,6 +916,9 @@ class DefaultQuadcopterStrategy:
         self.env._previous_actions = self.env._actions.clone()
 
         return observations
+
+
+
 
 
     def reset_idx(self, env_ids: Optional[torch.Tensor]):
@@ -965,7 +1009,11 @@ class DefaultQuadcopterStrategy:
         ang_vel = torch.zeros(n_reset, 3, device=self.device)
         motor_speeds = torch.zeros(n_reset, 4, device=self.device)
         waypoint_indices = start_indices.clone()
-        
+
+        if self.env.iteration == 600 and hasattr(self, '_reset_buffer'):
+            self._reset_buffer.purge_slow_states(min_speed=5.0)
+            print("[INFO] Reset buffer purged — keeping only states above 5 m/s")
+
         # After iteration 1000, 10% chance to spawn on ground in front of initial waypoint for recovery
         if self.env.iteration > 1000:
             percent_ground = 0.1  # 10%
