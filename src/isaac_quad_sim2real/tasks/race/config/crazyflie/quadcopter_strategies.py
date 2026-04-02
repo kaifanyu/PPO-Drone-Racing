@@ -453,6 +453,11 @@ class DefaultQuadcopterStrategy:
             self.env._prev_x_drone_wrt_gate[ids_not_passed] = (self.env._pose_drone_wrt_gate[ids_not_passed, 0])
             self._prev_distance_to_gate[ids_not_passed] = current_distance[ids_not_passed].clone()
 
+    def _reward_blend(self, full_val: float, start_iter: int, ramp_iters: int = 150) -> float:
+        """Linearly ramp a reward from 0 to full_val over ramp_iters after start_iter."""
+        t = (self.env.iteration - start_iter) / ramp_iters
+        return full_val * max(0.0, min(1.0, t))
+    
     def get_rewards(self) -> torch.Tensor:
 
         # Gate setup
@@ -515,59 +520,88 @@ class DefaultQuadcopterStrategy:
             (torch.abs(current_pose_prev_gate[:, 2]) <= expanded_half)
         )
         self._prev_pose_drone_wrt_prev_gate = current_pose_prev_gate.clone()
-
         if self.cfg.is_train:
-            # --- Core rewards ---
-            progress_reward    = progress * self.env.rew['progress_goal_reward_scale']
-            gate_reward_scaled = gate_reward * self.env.rew['target_reached_bonus_reward_scale']
+            itr = self.env.iteration
+
+            # ── Curriculum scale helpers ─────────────────────────────────────────
+            def ramp(start_itr, end_itr, v_min=0.0, v_max=1.0):
+                """Linearly ramp from v_min to v_max between start_itr and end_itr."""
+                t = (itr - start_itr) / max(end_itr - start_itr, 1)
+                return v_min + (v_max - v_min) * max(0.0, min(1.0, t))
+
+            # Each reward component gets a scalar multiplier that starts at 0
+            # and ramps to 1.0 over its assigned window.
+            # Phase 1 (0–400):   only progress + velocity — drone learns to fly & approach
+            # Phase 2 (400–600): gate crossing bonus fades in
+            # Phase 3 (500–700): death cost fades in (softly)
+            # Phase 4 (600–800): speed, line deviation, backward penalty fade in
+            # Phase 5 (800+):    lap penalty and time bonus active
+
+            scale_progress    = 1.0                          # always on
+            scale_velocity    = 1.0                          # always on
+            scale_gate        = ramp(400, 550)               # gates 400→550
+            scale_death       = ramp(450, 650)               # death 450→650
+            scale_speed_cross = ramp(500, 650)               # speed@crossing 500→650
+            scale_speed_thr   = ramp(550, 700)               # speed threshold 550→700
+            scale_line        = ramp(600, 750)               # line deviation 600→750
+            scale_backward    = ramp(600, 750)               # wrong direction 600→750
+            scale_lap_penalty = ramp(700, 850)               # lap penalty 700→850
+            scale_time_bonus  = ramp(800, 950)               # time bonus 800→950
+
+            # ── Core rewards ─────────────────────────────────────────────────────
+            progress_reward    = progress * self.env.rew['progress_goal_reward_scale'] * scale_progress
+            gate_reward_scaled = gate_reward * self.env.rew['target_reached_bonus_reward_scale'] * scale_gate
 
             laps_completed = self.env._n_gates_passed // num_gates
-            lap_penalty = self.env.rew['lap_incomplete_penalty_reward_scale'] * (laps_completed < 3).float()
+            lap_penalty = (
+                self.env.rew['lap_incomplete_penalty_reward_scale']
+                * (laps_completed < 3).float()
+                * scale_lap_penalty
+            )
 
-            wrong_direction = (gate_crossed_backward | prev_gate_crossed_backward).float()
-            backward_penalty = wrong_direction * self.env.rew.get('wrong_direction_penalty', -200.0)
+            wrong_direction  = (gate_crossed_backward | prev_gate_crossed_backward).float()
+            backward_penalty = wrong_direction * self.env.rew.get('wrong_direction_penalty', -200.0) * scale_backward
 
-            # --- Velocity setup ---
+            # ── Velocity toward gate ─────────────────────────────────────────────
             vel_w             = self.env._robot.data.root_com_lin_vel_w
             drone_pos         = self.env._robot.data.root_link_pos_w
             next_gate_centers = self.env._waypoints[next_gate_indices, :3]
 
-            gate_dir      = gate_centers - drone_pos
-            next_gate_dir = next_gate_centers - drone_pos
-            gate_dist     = torch.norm(gate_dir,      dim=1, keepdim=True).clamp(min=0.1)
+            gate_dir       = gate_centers - drone_pos
+            next_gate_dir  = next_gate_centers - drone_pos
+            gate_dist      = torch.norm(gate_dir,     dim=1, keepdim=True).clamp(min=0.1)
             next_gate_dist = torch.norm(next_gate_dir, dim=1, keepdim=True).clamp(min=0.1)
             gate_dir_unit      = gate_dir      / gate_dist
             next_gate_dir_unit = next_gate_dir / next_gate_dist
 
-            # Distance-gated blend: 100% toward current gate far away,
-            # up to 30% toward next gate within 2m — late apex behavior
-            transition_radius = 2.0
-            next_gate_weight = (1.0 - (gate_dist.squeeze(1) / transition_radius).clamp(0.0, 1.0)) * 0.3
-            curr_gate_weight = 1.0 - next_gate_weight
+            transition_radius  = 2.0
+            next_gate_weight   = (1.0 - (gate_dist.squeeze(1) / transition_radius).clamp(0.0, 1.0)) * 0.3
+            curr_gate_weight   = 1.0 - next_gate_weight
             blended_dir = (curr_gate_weight.unsqueeze(1) * gate_dir_unit +
                         next_gate_weight.unsqueeze(1) * next_gate_dir_unit)
             blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
 
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
-            velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
+            velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale'] * scale_velocity
 
-            # --- Speed at crossing ---
+            # ── Speed at crossing ────────────────────────────────────────────────
             crossing_speed          = torch.norm(vel_w, dim=1)
-            speed_at_crossing_bonus = gate_passed.float() * crossing_speed * \
-                                    self.env.rew['speed_at_crossing_reward_scale']
+            speed_at_crossing_bonus = (
+                gate_passed.float() * crossing_speed
+                * self.env.rew['speed_at_crossing_reward_scale']
+                * scale_speed_cross
+            )
 
-            # --- Curriculum speed threshold ---
-            # Stage 0=3.0, 1=3.5, ..., 6=6.0 m/s — rises every 200 iterations
+            # ── Curriculum speed threshold ───────────────────────────────────────
             base_threshold      = 3.0
             threshold_increment = 0.5
-            stage               = min(self.env.iteration // 200, 6)
+            stage               = min(itr // 200, 6)
             current_threshold   = base_threshold + stage * threshold_increment
             speed               = torch.norm(vel_w, dim=1)
             speed_above         = (speed - current_threshold).clamp(min=0.0)
-            threshold_reward    = speed_above * self.env.rew.get('speed_threshold_scale', 15.0)
+            threshold_reward    = speed_above * self.env.rew.get('speed_threshold_scale', 15.0) * scale_speed_thr
 
-            # --- Line deviation penalty ---
-            # Penalize lateral drift from the direct gate-to-gate line
+            # ── Line deviation penalty ───────────────────────────────────────────
             gate_to_gate      = next_gate_centers - gate_centers
             gate_to_gate_dist = torch.norm(gate_to_gate, dim=1, keepdim=True).clamp(min=0.1)
             gate_to_gate_unit = gate_to_gate / gate_to_gate_dist
@@ -577,20 +611,25 @@ class DefaultQuadcopterStrategy:
             lateral_dist      = torch.norm(lateral, dim=1)
             between_gates     = (along.squeeze(1) > 0.0) & \
                                 (along.squeeze(1) < gate_to_gate_dist.squeeze(1))
-            line_penalty = -lateral_dist * between_gates.float() * \
-                        self.env.rew.get('line_deviation_penalty_scale', 1.0)
+            line_penalty = (
+                -lateral_dist * between_gates.float()
+                * self.env.rew.get('line_deviation_penalty_scale', 1.0)
+                * scale_line
+            )
 
-            # --- Three lap time bonus ---
+            # ── Three lap time bonus ─────────────────────────────────────────────
             prev_laps            = (self.env._n_gates_passed - gate_passed.int()) // num_gates
             just_finished_3_laps = (laps_completed >= 3) & (prev_laps < 3)
             steps_taken          = self.env.episode_length_buf.float()
             step_budget          = 1800.0
             time_bonus = (
-                self.env.rew.get('three_lap_time_bonus', 3000.0) *
-                (0.1 + 0.9 * (1.0 - (steps_taken / step_budget).clamp(0.0, 1.0)))
-            ) * just_finished_3_laps.float()
+                self.env.rew.get('three_lap_time_bonus', 3000.0)
+                * (0.1 + 0.9 * (1.0 - (steps_taken / step_budget).clamp(0.0, 1.0)))
+                * just_finished_3_laps.float()
+                * scale_time_bonus
+            )
 
-            # --- Aggregate ---
+            # ── Aggregate ────────────────────────────────────────────────────────
             rewards = {
                 "progress_goal":          progress_reward,
                 "target_reached_bonus":   gate_reward_scaled,
@@ -603,23 +642,23 @@ class DefaultQuadcopterStrategy:
                 "three_lap_time_bonus":   time_bonus,
             }
 
-            # Sum excluding time_bonus so we can preserve it through death override
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0) - time_bonus
 
             for key, value in rewards.items():
                 self._episode_sums[key] += value
 
-            # Death override — lap completion bonus always paid regardless
+            # Death cost also ramps — never abrupt
+            death_cost = self.env.rew['death_cost'] * scale_death
             reward = torch.where(
                 self.env.reset_terminated,
-                torch.ones_like(reward) * self.env.rew['death_cost'],
+                torch.ones_like(reward) * death_cost,
                 reward
             )
             reward = reward + time_bonus
 
         else:
             reward = torch.zeros(self.num_envs, device=self.device)
-
+            
         return reward
 
     def get_observations(self) -> Dict[str, torch.Tensor]:
@@ -681,7 +720,6 @@ class DefaultQuadcopterStrategy:
 
         return observations
 
-
     def reset_idx(self, env_ids: Optional[torch.Tensor]):
         """Reset specific environments to initial states."""
         if env_ids is None:
@@ -699,11 +737,26 @@ class DefaultQuadcopterStrategy:
 
         # Logging for training mode
         if self.cfg.is_train and hasattr(self, '_episode_sums'):
+            ep_len = max(self.env.episode_length_buf[env_ids_tensor].float().mean().item(), 1)
+            gates  = self.env._n_gates_passed[env_ids_tensor].float().mean().item()
+
+            # DEBUG — read BEFORE zeroing
+            component_strs = []
+            total = 0.0
+            for k, v in self._episode_sums.items():
+                mean_val = v[env_ids_tensor].mean().item()
+                total += mean_val
+                component_strs.append(f"{k}={mean_val:.0f}")
+            print(f"[EPISODE_DEBUG] ep_len={ep_len:.0f} gates={gates:.1f} "
+                  f"total={total:.0f} per_step={total/ep_len:.2f}")
+            print(f"[EPISODE_DEBUG] breakdown: {' | '.join(component_strs)}")
+
+            # Tensorboard logging + zero-out (must happen after debug print)
             extras = dict()
             for key in self._episode_sums.keys():
                 episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids_tensor])
                 extras["Episode_Reward/" + key] = episodic_sum_avg / self.env.max_episode_length_s
-                self._episode_sums[key][env_ids_tensor] = 0.0
+                self._episode_sums[key][env_ids_tensor] = 0.0   # zero AFTER reading
             self.env.extras["log"] = dict()
             self.env.extras["log"].update(extras)
             extras = dict()
@@ -711,22 +764,7 @@ class DefaultQuadcopterStrategy:
             extras["Episode_Termination/time_out"] = torch.count_nonzero(self.env.reset_time_outs[env_ids_tensor]).item()
             self.env.extras["log"].update(extras)
 
-        if self.cfg.is_train and hasattr(self, '_episode_sums'):
-            ep_len  = self.env.episode_length_buf[env_ids_tensor].float().mean().item()
-            gates   = self.env._n_gates_passed[env_ids_tensor].float().mean().item()
-            ep_len  = max(ep_len, 1)
-            
-            component_strs = []
-            total = 0.0
-            for k, v in self._episode_sums.items():
-                mean_val = v[env_ids_tensor].mean().item()
-                total += mean_val
-                component_strs.append(f"{k}={mean_val:.0f}")
-            
-            print(f"[EPISODE_DEBUG] ep_len={ep_len:.0f} gates={gates:.1f} "
-                f"total={total:.0f} per_step={total/ep_len:.2f}")
-            print(f"[EPISODE_DEBUG] breakdown: {' | '.join(component_strs)}")
-            
+
         # Call robot reset first
         self.env._robot.reset(env_ids_tensor)
 
