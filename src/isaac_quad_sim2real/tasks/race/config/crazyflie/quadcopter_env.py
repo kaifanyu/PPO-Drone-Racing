@@ -694,12 +694,6 @@ class QuadcopterEnv(DirectRLEnv):
             # Training: reset only on death or crash (no timeouts unless specified)
             died = (cond_max_h | cond_h_min_time | cond_crashed)
 
-
-            # Early termination when 3 laps are complete
-            num_gates = self._waypoints.shape[0]
-            finished_race = (self._n_gates_passed // num_gates) >= 3
-            died = died | finished_race  # treated as termination, not timeout
-            
             if self.cfg.reset_time is not None:
                 time_out = self.episode_length_buf >= self.cfg.reset_time - 1
             else:
