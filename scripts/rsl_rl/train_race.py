@@ -137,10 +137,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # TODO ----- START ----- Define rewards scales
     # reward scales - override with CLI arguments
-    progress_goal_reward_scale = 20.0
+    progress_goal_reward_scale = 60.0
     target_reached_bonus_reward_scale = 700.0
     death_cost = -500.0
-    lap_incomplete_penalty_reward_scale = -0.01
+    lap_incomplete_penalty_reward_scale = -0.02
     roll_pitch_rates_reward_scale = -0.8  # Penalty for aggressive roll/pitch rates
     yaw_rate_reward_scale = -0.5  # Penalty for aggressive yaw rate
 
@@ -159,15 +159,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         yaw_rate_reward_scale = float(args_cli.yaw_rate_scale)
 
     rewards = {
-        'progress_goal_reward_scale': progress_goal_reward_scale,
-        'target_reached_bonus_reward_scale': target_reached_bonus_reward_scale,
-        'death_cost': death_cost,
-        'lap_incomplete_penalty_reward_scale': lap_incomplete_penalty_reward_scale,
-        'roll_pitch_rates_reward_scale': roll_pitch_rates_reward_scale,
-        'yaw_rate_reward_scale': yaw_rate_reward_scale,
+        'progress_goal_reward_scale': 60,
+        'target_reached_bonus_reward_scale': 700,
+        'death_cost': -500,
+        'lap_incomplete_penalty_reward_scale': -0.02,
+        'roll_pitch_rates_reward_scale': -0.7,
+        'yaw_rate_reward_scale': -0.4,
         'wrong_direction_penalty': -600.0,   # hitting a gate from the wrong side
         'out_of_order_gate_penalty': -350.0, # passing any gate other than the current target
-        'velocity_toward_gate_reward_scale': 4.0,   # <-- ADD THIS
+        'velocity_toward_gate_reward_scale': 0.0,   # <-- ADD THIS
+        'crossing_speed_reward_scale': 50.0        # NEW — fires at gate crossing only
     }
     # TODO ----- END -----
 
