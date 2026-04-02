@@ -711,6 +711,22 @@ class DefaultQuadcopterStrategy:
             extras["Episode_Termination/time_out"] = torch.count_nonzero(self.env.reset_time_outs[env_ids_tensor]).item()
             self.env.extras["log"].update(extras)
 
+        if self.cfg.is_train and hasattr(self, '_episode_sums'):
+            ep_len  = self.env.episode_length_buf[env_ids_tensor].float().mean().item()
+            gates   = self.env._n_gates_passed[env_ids_tensor].float().mean().item()
+            ep_len  = max(ep_len, 1)
+            
+            component_strs = []
+            total = 0.0
+            for k, v in self._episode_sums.items():
+                mean_val = v[env_ids_tensor].mean().item()
+                total += mean_val
+                component_strs.append(f"{k}={mean_val:.0f}")
+            
+            print(f"[EPISODE_DEBUG] ep_len={ep_len:.0f} gates={gates:.1f} "
+                f"total={total:.0f} per_step={total/ep_len:.2f}")
+            print(f"[EPISODE_DEBUG] breakdown: {' | '.join(component_strs)}")
+            
         # Call robot reset first
         self.env._robot.reset(env_ids_tensor)
 
