@@ -685,21 +685,33 @@ class DefaultQuadcopterStrategy:
 
             laps_completed = self.env._n_gates_passed // num_gates  # single definition
             lap_penalty    = self.env.rew['lap_incomplete_penalty_reward_scale'] * (laps_completed < 3).float()
-
-            vel_w           = self.env._robot.data.root_com_lin_vel_w
+            
+            
+            vel_w = self.env._robot.data.root_com_lin_vel_w
             next_gate_centers = self.env._waypoints[next_gate_indices, :3]
 
             gate_dir      = gate_centers - self.env._robot.data.root_link_pos_w
             next_gate_dir = next_gate_centers - self.env._robot.data.root_link_pos_w
+
             gate_dist      = torch.norm(gate_dir,      dim=1, keepdim=True).clamp(min=0.1)
             next_gate_dist = torch.norm(next_gate_dir, dim=1, keepdim=True).clamp(min=0.1)
+
             gate_dir_unit      = gate_dir      / gate_dist
             next_gate_dir_unit = next_gate_dir / next_gate_dist
 
-            blended_dir    = 0.6 * gate_dir_unit + 0.4 * next_gate_dir_unit
-            blended_dir    = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
-            vel_toward_gate   = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
-            velocity_reward   = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
+            # Only blend toward next gate when within 2m of current gate
+            # Far away = 100% toward current gate (direct line)
+            # Close    = up to 30% toward next gate (late apex)
+            transition_radius = 2.0   # meters — start anticipating next gate here
+            next_gate_weight = (1.0 - (gate_dist.squeeze(1) / transition_radius).clamp(0.0, 1.0)) * 0.3
+            curr_gate_weight = 1.0 - next_gate_weight
+
+            blended_dir = (curr_gate_weight.unsqueeze(1) * gate_dir_unit + 
+                        next_gate_weight.unsqueeze(1) * next_gate_dir_unit)
+            blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
+
+            vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
+            velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
 
             crossing_speed        = torch.norm(vel_w, dim=1)
             speed_at_crossing_bonus = gate_passed.float() * crossing_speed * self.env.rew['speed_at_crossing_reward_scale']
@@ -735,40 +747,40 @@ class DefaultQuadcopterStrategy:
             reward = torch.zeros(self.num_envs, device=self.device)
         
         # At the top of get_rewards(), add a step counter if you don't have one
-        if not hasattr(self, '_debug_step'):
-            self._debug_step = 0
-        self._debug_step += 1
-        LOG_EVERY = 500  # print every 500 steps
+        # if not hasattr(self, '_debug_step'):
+        #     self._debug_step = 0
+        # self._debug_step += 1
+        # LOG_EVERY = 500  # print every 500 steps
 
-        if self._debug_step % LOG_EVERY == 0:
-            # --- 1. Episode length distribution ---
-            print(f"[REWARD_DEBUG] episode_length | mean={self.env.episode_length_buf.float().mean():.1f} "
-                f"min={self.env.episode_length_buf.min().item():.1f} "
-                f"max={self.env.episode_length_buf.max().item():.1f}")
+        # if self._debug_step % LOG_EVERY == 0:
+        #     # --- 1. Episode length distribution ---
+        #     print(f"[REWARD_DEBUG] episode_length | mean={self.env.episode_length_buf.float().mean():.1f} "
+        #         f"min={self.env.episode_length_buf.min().item():.1f} "
+        #         f"max={self.env.episode_length_buf.max().item():.1f}")
 
-            # --- 2. How many gates are being passed per episode ---
-            print(f"[REWARD_DEBUG] gates_passed   | mean={self.env._n_gates_passed.float().mean():.2f} "
-                f"max={self.env._n_gates_passed.max().item()}")
+        #     # --- 2. How many gates are being passed per episode ---
+        #     print(f"[REWARD_DEBUG] gates_passed   | mean={self.env._n_gates_passed.float().mean():.2f} "
+        #         f"max={self.env._n_gates_passed.max().item()}")
 
-            # --- 3. Crash rate ---
-            death_rate = self.env.reset_terminated.float().mean().item()
-            print(f"[REWARD_DEBUG] death_rate     | {death_rate:.3f}  (>0.5 means agent is crashing on purpose)")
+        #     # --- 3. Crash rate ---
+        #     death_rate = self.env.reset_terminated.float().mean().item()
+        #     print(f"[REWARD_DEBUG] death_rate     | {death_rate:.3f}  (>0.5 means agent is crashing on purpose)")
 
-            # --- 4. Current speed distribution ---
-            speed = torch.norm(self.env._robot.data.root_com_lin_vel_w, dim=1)
-            print(f"[REWARD_DEBUG] speed (m/s)    | mean={speed.mean():.2f} "
-                f"max={speed.max():.2f} min={speed.min():.2f}")
+        #     # --- 4. Current speed distribution ---
+        #     speed = torch.norm(self.env._robot.data.root_com_lin_vel_w, dim=1)
+        #     print(f"[REWARD_DEBUG] speed (m/s)    | mean={speed.mean():.2f} "
+        #         f"max={speed.max():.2f} min={speed.min():.2f}")
 
-            # --- 5. Raw reward component magnitudes (BEFORE scaling) ---
-            print(f"[REWARD_DEBUG] progress_raw   | mean={progress.mean():.4f}  "
-                f"(scaled={( progress * self.env.rew['progress_goal_reward_scale']).mean():.2f})")
-            print(f"[REWARD_DEBUG] vel_raw        | mean={vel_toward_gate.mean():.4f}  "
-                f"(scaled={(vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']).mean():.2f})")
-            print(f"[REWARD_DEBUG] lap_penalty    | mean={lap_penalty.mean():.4f}")
+        #     # --- 5. Raw reward component magnitudes (BEFORE scaling) ---
+        #     print(f"[REWARD_DEBUG] progress_raw   | mean={progress.mean():.4f}  "
+        #         f"(scaled={( progress * self.env.rew['progress_goal_reward_scale']).mean():.2f})")
+        #     print(f"[REWARD_DEBUG] vel_raw        | mean={vel_toward_gate.mean():.4f}  "
+        #         f"(scaled={(vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']).mean():.2f})")
+        #     print(f"[REWARD_DEBUG] lap_penalty    | mean={lap_penalty.mean():.4f}")
 
-            # --- 6. Accumulated reward per component this episode (from episode_sums) ---
-            for key, tensor in self._episode_sums.items():
-                print(f"[REWARD_DEBUG] episodic_sum/{key:30s} | mean={tensor.mean():.1f}")
+        #     # --- 6. Accumulated reward per component this episode (from episode_sums) ---
+        #     for key, tensor in self._episode_sums.items():
+        #         print(f"[REWARD_DEBUG] episodic_sum/{key:30s} | mean={tensor.mean():.1f}")
 
         return reward
     

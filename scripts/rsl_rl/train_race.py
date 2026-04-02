@@ -154,9 +154,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'progress_goal_reward_scale':          30.0,
         'target_reached_bonus_reward_scale':   700.0,
         'death_cost':                         -500.0,
-        'lap_incomplete_penalty_reward_scale': -0.05,  # back to original
-        'velocity_toward_gate_reward_scale':    6.0,   # drastically reduced
-        'speed_at_crossing_reward_scale':      20.0,   # keep but gate-gated so safe
+        'lap_incomplete_penalty_reward_scale': -0.05,
+        'velocity_toward_gate_reward_scale':   10.0,
+        'speed_at_crossing_reward_scale':      25.0,   # slight bump — main speed signal
+        # 'line_deviation_penalty_scale':         2.0,   # new — keeps line tight
+        'three_lap_time_bonus':              3000.0,   # must be here or it won't apply
     }
 
     env_cfg.is_train = True
