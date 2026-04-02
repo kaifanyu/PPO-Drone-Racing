@@ -547,7 +547,7 @@ class DefaultQuadcopterStrategy:
             scale_backward    = ramp(200, 350)    # was 600→750
             scale_lap_penalty = ramp(300, 450)    # was 700→850
             scale_time_bonus  = ramp(400, 550)    # was 800→950
-            
+
             # ── Core rewards ─────────────────────────────────────────────────────
             progress_reward    = progress * self.env.rew['progress_goal_reward_scale'] * scale_progress
             gate_reward_scaled = gate_reward * self.env.rew['target_reached_bonus_reward_scale'] * scale_gate
@@ -643,7 +643,9 @@ class DefaultQuadcopterStrategy:
             }
 
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0) - time_bonus
+            reward = reward.clamp(-300.0, 300.0)   # ADD THIS
 
+            
             for key, value in rewards.items():
                 self._episode_sums[key] += value
 

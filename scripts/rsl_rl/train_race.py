@@ -158,18 +158,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.yaw_rate_scale is not None:
         yaw_rate_reward_scale = float(args_cli.yaw_rate_scale)
 
+
     rewards = {
-        'progress_goal_reward_scale':          30.0,
-        'target_reached_bonus_reward_scale':   700.0,
-        'death_cost':                         -500.0,
-        'lap_incomplete_penalty_reward_scale': -0.05,
-        'wrong_direction_penalty':            -200.0,
-        'velocity_toward_gate_reward_scale':    3.0,   # was 10.0 — was dominating
-        'speed_at_crossing_reward_scale':      60.0,
-        'speed_threshold_scale':               15.0,
-        'line_deviation_penalty_scale':         1.0,
-        'three_lap_time_bonus':              3000.0,
+        'progress_goal_reward_scale':           30.0,
+        'target_reached_bonus_reward_scale':    700.0,   # keep — this is correct
+        'death_cost':                          -500.0,
+        'lap_incomplete_penalty_reward_scale':  -0.05,
+        'wrong_direction_penalty':             -200.0,
+        'velocity_toward_gate_reward_scale':     3.0,   # WAS 10.0 — dominant, cut it
+        'speed_at_crossing_reward_scale':       60.0,   # keep — only fires on gate cross
+        'speed_threshold_scale':                 5.0,   # WAS 15.0 — cut it, paired with vel it's too much
+        'line_deviation_penalty_scale':          1.0,
+        'three_lap_time_bonus':               3000.0,
     }
+
+    
     env_cfg.is_train = True
     env_cfg.rewards = rewards
     env_cfg.reset_time = args_cli.reset_time
