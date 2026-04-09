@@ -161,11 +161,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # TODO ----- START ----- Define rewards scales
     # reward scales - override with CLI arguments
     progress_goal_reward_scale = 20.0
-    target_reached_bonus_reward_scale = 400.0
-    death_cost = -500.0
-    lap_incomplete_penalty_reward_scale = -0.01
-    roll_pitch_rates_reward_scale = -1  # Penalty for aggressive roll/pitch rates
-    yaw_rate_reward_scale = -0.5  # Penalty for aggressive yaw rate
+    target_reached_bonus_reward_scale = 500.0
+    death_cost = -200.0
+    lap_incomplete_penalty_reward_scale = -0.1
+    roll_pitch_rates_reward_scale = -0.5  # Penalty for aggressive roll/pitch rates
+    yaw_rate_reward_scale = -1.0  # Penalty for aggressive yaw rate
 
     rewards = {
         'progress_goal_reward_scale': progress_goal_reward_scale,
@@ -174,9 +174,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'lap_incomplete_penalty_reward_scale': lap_incomplete_penalty_reward_scale,
         'roll_pitch_rates_reward_scale': roll_pitch_rates_reward_scale,
         'yaw_rate_reward_scale': yaw_rate_reward_scale,
+        'velocity_toward_gate_reward_scale': 2.0,  # add this line
     }
-    # TODO ----- END -----
-    # TODO ----- END -----
 
     env_cfg.is_train = True
     env_cfg.rewards = rewards
