@@ -177,6 +177,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'velocity_toward_gate_reward_scale': 2.0,  # add this line
     }
 
+    # TODO: End
+
     env_cfg.is_train = True
     env_cfg.rewards = rewards
     env_cfg.reset_time = args_cli.reset_time

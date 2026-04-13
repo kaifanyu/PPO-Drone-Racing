@@ -32,6 +32,8 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--follow_robot", type=int, default=-1, help="Follow robot index.")
 parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+parser.add_argument("--time_laps", action="store_true", default=False, help="Print simulated lap times. Does not stop after 3 laps.")
+parser.add_argument("--end_after_laps", action="store_true", default=False, help="Stop simulation after 3 laps.")
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -87,10 +89,15 @@ def main():
     if args_cli.follow_robot == -1:
         env_cfg.viewer.resolution = (1280, 720)
         # env_cfg.viewer.resolution = (1920, 1080)
+        # View Default
         # env_cfg.viewer.eye = (10.7, 0.4, 7.2)
         # env_cfg.viewer.lookat = (-2.7, 0.5, -0.3)
-        env_cfg.viewer.eye    = (8.0, -9.5, 3.2)   # +2.3 back, +3.1 left
-        env_cfg.viewer.lookat = (-2.7, 4.0, -1)  # aim shifted left (+3.5 Y)
+        # View for Testing Powerloop
+        # env_cfg.viewer.eye    = (8.0, -9.5, 3.2)   # +2.3 back, +3.1 left
+        # env_cfg.viewer.lookat = (-2.7, 4.0, -1)  # aim shifted left (+3.5 Y)
+        # View for Testing Circle
+        env_cfg.viewer.eye = (12.0, 0.4, 7.2) # +1.3, 
+        env_cfg.viewer.lookat = (-2.7, 0.5, -0.3)
     elif args_cli.follow_robot >= 0:
         
         env_cfg.viewer.eye = (-0.8, 0.8, 0.8)
@@ -154,31 +161,54 @@ def main():
     control_dt = 0.02 
     
     total_steps = 0
-    race_finished = False
+    lap_count = 0
+    lap_start_step = 0
+    prev_gates_passed = 0
+    base_env = env.unwrapped
+    num_gates = base_env._waypoints.shape[0]
+    NUM_LAPS = 3
 
-    print("[INFO] Starting race timer...")
+    if args_cli.time_laps or args_cli.end_after_laps:
+        print(f"[INFO] Lap timing enabled. {'Will stop after ' + str(NUM_LAPS) + ' laps.' if args_cli.end_after_laps else 'Running indefinitely.'}")
+    else:
+        print("[INFO] Running indefinitely (no lap timing or stopping).")
 
     # simulate environment
-    while simulation_app.is_running() and not race_finished:
+    while simulation_app.is_running():
         with torch.inference_mode():
             actions = policy(obs)
             obs, rewards, dones, infos = env.step(actions)
-            
-            if hasattr(obs, "get"):  
-                obs = obs["policy"]  
 
-            # 1. Add a step to our counter
+            if hasattr(obs, "get"):
+                obs = obs["policy"]
+
             total_steps += 1
 
-            # 2. Check if the environment signals the race is over
-            # dones is a tensor, we check if the first environment (index 0) is done
-            if dones[0].item(): 
-                race_finished = True
-                total_simulated_time = total_steps * control_dt
-                print(f"🏁 Race Finished!")
-                print(f"Total simulated steps: {total_steps}")
-                print(f"Total lap time: {total_simulated_time:.2f} seconds")
-                break
+            # Lap timing: track gates passed for env 0
+            if args_cli.time_laps or args_cli.end_after_laps:
+                curr_gates = base_env._n_gates_passed[0].item()
+                if curr_gates > prev_gates_passed:
+                    # One or more gates passed this step
+                    for _ in range(curr_gates - prev_gates_passed):
+                        if curr_gates % num_gates == 0:
+                            lap_count += 1
+                            lap_steps = total_steps - lap_start_step
+                            lap_time = lap_steps * control_dt
+                            total_time = total_steps * control_dt
+                            print(f"[LAP {lap_count}] Lap: {lap_time:.2f}s | Total: {total_time:.2f}s")
+                            lap_start_step = total_steps
+
+                            if args_cli.end_after_laps and lap_count >= NUM_LAPS:
+                                print(f"[INFO] {NUM_LAPS} laps complete. Stopping.")
+                                break
+                    prev_gates_passed = curr_gates
+
+            # On episode reset (done), update gate baseline
+            if dones[0].item():
+                if args_cli.end_after_laps and lap_count >= NUM_LAPS:
+                    break
+                # Reset per-episode gate counter baseline
+                prev_gates_passed = 0
 
     # close the simulator
     env.close()
