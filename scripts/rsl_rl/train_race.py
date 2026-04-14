@@ -249,13 +249,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'spawn_z_max':          3.0,    # max vertical spawn offset
     }
 
+    # OBSERVATION NOISE
+    # Gaussian noise (std) injected per observation component during training.
+    # Simulates sensor noise to improve sim-to-real transfer.
+    # Set any value to 0.0 to disable noise for that component.
+    # ==========================================================================
+    # No Noise, Death Rate: 0.292
+    obs_noise = {
+        'lin_vel_std':      0.00,   # linear velocity in body frame (m/s)
+        'attitude_std':     0.00,   # rotation matrix elements (unitless)
+        'gate_curr_std':    0.00,   # current gate corner positions in body frame (m)
+        'gate_next_std':    0.00,   # next gate corner positions in body frame (m)
+    }
+    # Default Noise, Death Rate: 0.875
+    # obs_noise = {
+    #     'lin_vel_std':      0.05,   # linear velocity in body frame (m/s)
+    #     'attitude_std':     0.01,   # rotation matrix elements (unitless)
+    #     'gate_curr_std':    0.05,   # current gate corner positions in body frame (m)
+    #     'gate_next_std':    0.05,   # next gate corner positions in body frame (m)
+    # }
+
     env_cfg.is_train = True
     env_cfg.rewards = rewards
     env_cfg.reset_time = args_cli.reset_time
 
-    # Pass reward shaping, DR ranges, and spawn config to env
+    # Pass reward shaping, DR ranges, spawn config, and obs noise to env
     env_cfg.reward_shaping = reward_shaping
     env_cfg.dr_ranges = dr_ranges
+    env_cfg.obs_noise = obs_noise
     env_cfg.gate_detection_expand = reward_shaping['gate_detection_expand']
     for k, v in spawn_cfg.items():
         setattr(env_cfg, k, v)

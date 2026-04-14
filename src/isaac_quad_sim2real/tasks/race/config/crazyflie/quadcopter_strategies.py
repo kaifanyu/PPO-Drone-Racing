@@ -214,6 +214,13 @@ class DefaultQuadcopterStrategy:
         self._ki_omega_y_range  = _dr.get('ki_omega_y_range',  (0.85, 1.15))
         self._kd_omega_y_range  = _dr.get('kd_omega_y_range',  (0.7,  1.3))
         
+        # Observation noise — read from cfg if set by train_race.py, else zero (no noise)
+        _on = getattr(self.cfg, 'obs_noise', {})
+        self._obs_noise_lin_vel_std   = _on.get('lin_vel_std',   0.0)
+        self._obs_noise_attitude_std  = _on.get('attitude_std',  0.0)
+        self._obs_noise_gate_curr_std = _on.get('gate_curr_std', 0.0)
+        self._obs_noise_gate_next_std = _on.get('gate_next_std', 0.0)
+
         # Spawn randomization parameters for curriculum reset (with fallback defaults)
         # These are used when replay buffer is empty for a given gate
         self.spawn_circle_scale = getattr(self.cfg, 'spawn_circle_scale', 3.0)
@@ -650,12 +657,28 @@ class DefaultQuadcopterStrategy:
         quat_w = self.env._robot.data.root_quat_w
         attitude_mat = matrix_from_quat(quat_w)
 
+        # Per-component observation noise (Gaussian, std configurable via train_race.py obs_noise)
+        lin_vel_obs  = self.env._robot.data.root_com_lin_vel_b
+        attitude_obs = attitude_mat.view(attitude_mat.shape[0], -1)
+        gate_curr_obs = waypoint_pos_b_curr.view(waypoint_pos_b_curr.shape[0], -1)
+        gate_next_obs = waypoint_pos_b_next.view(waypoint_pos_b_next.shape[0], -1)
+
+        if self.cfg.is_train:
+            if self._obs_noise_lin_vel_std > 0.0:
+                lin_vel_obs  = lin_vel_obs  + torch.randn_like(lin_vel_obs)  * self._obs_noise_lin_vel_std
+            if self._obs_noise_attitude_std > 0.0:
+                attitude_obs = attitude_obs + torch.randn_like(attitude_obs) * self._obs_noise_attitude_std
+            if self._obs_noise_gate_curr_std > 0.0:
+                gate_curr_obs = gate_curr_obs + torch.randn_like(gate_curr_obs) * self._obs_noise_gate_curr_std
+            if self._obs_noise_gate_next_std > 0.0:
+                gate_next_obs = gate_next_obs + torch.randn_like(gate_next_obs) * self._obs_noise_gate_next_std
+
         obs = torch.cat(
             [
-                self.env._robot.data.root_com_lin_vel_b,			# 3 dim (linear vel in body frame)
-                attitude_mat.view(attitude_mat.shape[0], -1),			# 9 dim (drone rotation matrix)
-                waypoint_pos_b_curr.view(waypoint_pos_b_curr.shape[0], -1),	# 12 dim (corners of current gate)
-                waypoint_pos_b_next.view(waypoint_pos_b_next.shape[0], -1),	# 12 dim (corners of next gate)
+                lin_vel_obs,   # 3 dim (linear vel in body frame)
+                attitude_obs,  # 9 dim (drone rotation matrix)
+                gate_curr_obs, # 12 dim (corners of current gate)
+                gate_next_obs, # 12 dim (corners of next gate)
             ],
             dim=-1,
         )
