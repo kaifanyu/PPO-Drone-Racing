@@ -202,16 +202,17 @@ class DefaultQuadcopterStrategy:
                 for key in keys + extra_keys
             }
 
-        # Ranges for evaluation with given min / max to mimic the sim2real gap
-        self._twr_range = (0.95, 1.05)
-        self._k_aero_xy_range = (0.5, 2.0)
-        self._k_aero_z_range = (0.5, 2.0)
-        self._kp_omega_rp_range = (0.85, 1.15)
-        self._ki_omega_rp_range = (0.85, 1.15)
-        self._kd_omega_rp_range = (0.7, 1.3)
-        self._kp_omega_y_range = (0.85, 1.15)
-        self._ki_omega_y_range = (0.85, 1.15)
-        self._kd_omega_y_range = (0.7, 1.3)
+        # Domain randomization ranges — read from cfg if set by train_race.py, else use defaults
+        _dr = getattr(self.cfg, 'dr_ranges', {})
+        self._twr_range         = _dr.get('twr_range',         (0.95, 1.05))
+        self._k_aero_xy_range   = _dr.get('k_aero_xy_range',   (0.5,  2.0))
+        self._k_aero_z_range    = _dr.get('k_aero_z_range',    (0.5,  2.0))
+        self._kp_omega_rp_range = _dr.get('kp_omega_rp_range', (0.85, 1.15))
+        self._ki_omega_rp_range = _dr.get('ki_omega_rp_range', (0.85, 1.15))
+        self._kd_omega_rp_range = _dr.get('kd_omega_rp_range', (0.7,  1.3))
+        self._kp_omega_y_range  = _dr.get('kp_omega_y_range',  (0.85, 1.15))
+        self._ki_omega_y_range  = _dr.get('ki_omega_y_range',  (0.85, 1.15))
+        self._kd_omega_y_range  = _dr.get('kd_omega_y_range',  (0.7,  1.3))
         
         # Spawn randomization parameters for curriculum reset (with fallback defaults)
         # These are used when replay buffer is empty for a given gate
@@ -477,12 +478,20 @@ class DefaultQuadcopterStrategy:
         Wrong direction penalty: avoid going back through same gate for gate 4
         """
 
+        # Reward shaping values — read from cfg if set by train_race.py, else use defaults
+        _rs = getattr(self.cfg, 'reward_shaping', {})
+        gate_pass_bonus      = _rs.get('gate_pass_bonus',       1.0)
+        gate_miss_penalty    = _rs.get('gate_miss_penalty',    -1.0)
+        vel_blend_ratio      = _rs.get('vel_blend_ratio',       0.8)
+        lap_count_threshold  = _rs.get('lap_count_threshold',   3)
+        crash_mask_steps     = _rs.get('crash_mask_steps',      100)
+        expand               = _rs.get('gate_detection_expand', 1.4)
+
         # Gate setup
         pose_gate = self.env._pose_drone_wrt_gate  # [x,y,z] in gate frame
         gate_half = getattr(self.env._gate_model_cfg_data, "gate_side", 1.0) * 0.5 \
             if hasattr(self.env, "_gate_model_cfg_data") else 0.5
-        expand = getattr(self.cfg, "gate_detection_expand", 1.4)
-        expanded_half = gate_half * expand 
+        expanded_half = gate_half * expand
 
         gate_centers = self.env._waypoints[self.env._idx_wp, :3]
         self.env._desired_pos_w[:] = gate_centers   # desired pos = gate centers
@@ -492,7 +501,7 @@ class DefaultQuadcopterStrategy:
         # Crash detection
         contact_forces = self.env._contact_sensor.data.net_forces_w
         crashed = (torch.norm(contact_forces, dim=-1) > 1e-8).squeeze(1).int()
-        mask = (self.env.episode_length_buf > 100).int()
+        mask = (self.env.episode_length_buf > crash_mask_steps).int()
         self.env._crashed = self.env._crashed + crashed * mask
 
         # Gate Cross detection
@@ -517,8 +526,8 @@ class DefaultQuadcopterStrategy:
         # advance waypoint index for passed gates only
         self._handle_gate_crossing(gate_passed)
         
-        # combined rewards for pass (+1.0) and miss (-1.0)
-        gate_reward = gate_passed.float() * 1.0 + gate_missed.float() * (-1.0)
+        # combined rewards for pass/miss
+        gate_reward = gate_passed.float() * gate_pass_bonus + gate_missed.float() * gate_miss_penalty
         
         #  update tracking for next timestep
         self._update_tracking_variables(gate_passed, current_distance)
@@ -547,7 +556,7 @@ class DefaultQuadcopterStrategy:
             
             # Lap incomplete penalty per-step until 3
             laps_completed = self.env._n_gates_passed // num_gates
-            lap_penalty = (self.env.rew['lap_incomplete_penalty_reward_scale'] * (laps_completed < 3).float())
+            lap_penalty = (self.env.rew['lap_incomplete_penalty_reward_scale'] * (laps_completed < lap_count_threshold).float())
             
             # penalize aggressive roll and pitch rates for more stability
             roll_pitch_rates = torch.sum(torch.square(self.env._actions[:, 1:3]), dim=1)
@@ -577,8 +586,8 @@ class DefaultQuadcopterStrategy:
             gate_dir_unit = gate_dir / gate_dist
             next_gate_dir_unit = next_gate_dir / next_gate_dist
 
-            # 80% toward current gate, 20% toward next — tightens corner anticipation
-            blended_dir = 0.8 * gate_dir_unit + 0.2 * next_gate_dir_unit
+            # blend toward current gate and next gate — tightens corner anticipation
+            blended_dir = vel_blend_ratio * gate_dir_unit + (1.0 - vel_blend_ratio) * next_gate_dir_unit
             blended_dir = blended_dir / torch.norm(blended_dir, dim=1, keepdim=True).clamp(min=0.1)
 
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)

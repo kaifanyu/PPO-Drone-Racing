@@ -135,16 +135,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             log_dir += f"_{agent_cfg.run_name}"
         log_dir = os.path.join(log_root_path, log_dir)
 
-    # TODO ----- START ----- Define rewards scales
-    # reward scales - override with CLI arguments
-    progress_goal_reward_scale = 60.0
-    target_reached_bonus_reward_scale = 700.0
-    death_cost = -500.0
-    lap_incomplete_penalty_reward_scale = -0.02
-    roll_pitch_rates_reward_scale = -0.8  # Penalty for aggressive roll/pitch rates
-    yaw_rate_reward_scale = -0.5  # Penalty for aggressive yaw rate
+    # ==========================================================================
+    # REWARD SCALES
+    # Modify these to shape training behavior.
+    # CLI flags (--progress_scale, etc.) override these values when provided.
+    # ==========================================================================
+    progress_goal_reward_scale          = 20.0 # 20, 5
+    target_reached_bonus_reward_scale   = 500.0
+    death_cost                          = -200.0
+    lap_incomplete_penalty_reward_scale = -0.1
+    roll_pitch_rates_reward_scale       = -0.5   # penalty for aggressive roll/pitch rates
+    yaw_rate_reward_scale               = -1.0   # penalty for aggressive yaw rate -1, -2
+    velocity_toward_gate_reward_scale   = 2.0    # reward for velocity toward gate
 
-    # CLI overrides for reward scaling
+    # CLI overrides
     if args_cli.progress_scale is not None:
         progress_goal_reward_scale = float(args_cli.progress_scale)
     if args_cli.target_bonus_scale is not None:
@@ -158,30 +162,103 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.yaw_rate_scale is not None:
         yaw_rate_reward_scale = float(args_cli.yaw_rate_scale)
 
-    # TODO ----- START ----- Define rewards scales
-    # reward scales - override with CLI arguments
-    progress_goal_reward_scale = 20.0
-    target_reached_bonus_reward_scale = 500.0
-    death_cost = -200.0
-    lap_incomplete_penalty_reward_scale = -0.1
-    roll_pitch_rates_reward_scale = -0.5  # Penalty for aggressive roll/pitch rates
-    yaw_rate_reward_scale = -1.0  # Penalty for aggressive yaw rate
-
     rewards = {
-        'progress_goal_reward_scale': progress_goal_reward_scale,
-        'target_reached_bonus_reward_scale': target_reached_bonus_reward_scale,
-        'death_cost': death_cost,
-        'lap_incomplete_penalty_reward_scale': lap_incomplete_penalty_reward_scale,
-        'roll_pitch_rates_reward_scale': roll_pitch_rates_reward_scale,
-        'yaw_rate_reward_scale': yaw_rate_reward_scale,
-        'velocity_toward_gate_reward_scale': 2.0,  # add this line
+        'progress_goal_reward_scale':           progress_goal_reward_scale,
+        'target_reached_bonus_reward_scale':    target_reached_bonus_reward_scale,
+        'death_cost':                           death_cost,
+        'lap_incomplete_penalty_reward_scale':  lap_incomplete_penalty_reward_scale,
+        'roll_pitch_rates_reward_scale':        roll_pitch_rates_reward_scale,
+        'yaw_rate_reward_scale':                yaw_rate_reward_scale,
+        'velocity_toward_gate_reward_scale':    velocity_toward_gate_reward_scale,
     }
 
-    # TODO: End
+    # ==========================================================================
+    # REWARD SHAPING
+    # Fine-grained control over hardcoded reward values in get_rewards().
+    # ==========================================================================
+    reward_shaping = {
+        'gate_pass_bonus':      1.0,    # sparse bonus magnitude for a clean gate pass
+        'gate_miss_penalty':   -1.0,    # sparse penalty magnitude for clipping the gate
+        'vel_blend_ratio':      0.95,    # fraction of velocity reward aimed at current gate
+                                        # (1 - vel_blend_ratio) aimed at next gate 0.8, 0.5, 0.95
+        'lap_count_threshold':  3,      # number of laps before lap-incomplete penalty stops
+        'gate_detection_expand': 1.4,   # expanded gate half-width multiplier for miss detection
+        'crash_mask_steps':     100,    # steps before crash detection activates each episode
+    }
+
+    # ==========================================================================
+    # DOMAIN RANDOMIZATION RANGES
+    # Each tuple is (min_multiplier, max_multiplier) applied to the base value.
+    # Wider ranges = harder training, better sim-to-real transfer.
+    # ==========================================================================
+    
+    # Default Death Rate: 0.8333
+
+    # dr_ranges = {
+    #     'twr_range':            (0.95, 1.05),   # thrust-to-weight ratio
+    #     'k_aero_xy_range':      (0.5,  2.0),    # XY aerodynamic drag coefficient
+    #     'k_aero_z_range':       (0.5,  2.0),    # Z aerodynamic drag coefficient
+    #     'kp_omega_rp_range':    (0.85, 1.15),   # roll/pitch rate Kp gain
+    #     'ki_omega_rp_range':    (0.85, 1.15),   # roll/pitch rate Ki gain
+    #     'kd_omega_rp_range':    (0.7,  1.3),    # roll/pitch rate Kd gain
+    #     'kp_omega_y_range':     (0.85, 1.15),   # yaw rate Kp gain
+    #     'ki_omega_y_range':     (0.85, 1.15),   # yaw rate Ki gain
+    #     'kd_omega_y_range':     (0.7,  1.3),    # yaw rate Kd gain
+    # }
+
+    # Domain Randomization 0, Death Rate: 0.292
+
+    dr_ranges = {
+        'twr_range':            (0.90, 1.10),   # thrust-to-weight ratio         ±5% → ±10%
+        'k_aero_xy_range':      (0.4,  2.3),    # XY aerodynamic drag coefficient 0.5–2.0 → 0.4–2.3
+        'k_aero_z_range':       (0.4,  2.3),    # Z aerodynamic drag coefficient  0.5–2.0 → 0.4–2.3
+        'kp_omega_rp_range':    (0.80, 1.20),   # roll/pitch rate Kp gain         ±15% → ±20%
+        'ki_omega_rp_range':    (0.80, 1.20),   # roll/pitch rate Ki gain         ±15% → ±20%
+        'kd_omega_rp_range':    (0.65, 1.35),   # roll/pitch rate Kd gain         ±30% → ±35%
+        'kp_omega_y_range':     (0.80, 1.20),   # yaw rate Kp gain                ±15% → ±20%
+        'ki_omega_y_range':     (0.80, 1.20),   # yaw rate Ki gain                ±15% → ±20%
+        'kd_omega_y_range':     (0.65, 1.35),   # yaw rate Kd gain                ±30% → ±35%
+    }
+
+    # Domain Randomization 1, Death Rate: 0.91677
+
+    # dr_ranges = {
+    #     'twr_range':            (0.80, 1.20),   # thrust-to-weight ratio         ±10% → ±20%
+    #     'k_aero_xy_range':      (0.25, 2.75),   # XY aerodynamic drag coefficient 0.4–2.3 → 0.25–2.75
+    #     'k_aero_z_range':       (0.25, 2.75),   # Z aerodynamic drag coefficient  0.4–2.3 → 0.25–2.75
+    #     'kp_omega_rp_range':    (0.70, 1.30),   # roll/pitch rate Kp gain         ±20% → ±30%
+    #     'ki_omega_rp_range':    (0.70, 1.30),   # roll/pitch rate Ki gain         ±20% → ±30%
+    #     'kd_omega_rp_range':    (0.50, 1.50),   # roll/pitch rate Kd gain         ±35% → ±50%
+    #     'kp_omega_y_range':     (0.70, 1.30),   # yaw rate Kp gain                ±20% → ±30%
+    #     'ki_omega_y_range':     (0.70, 1.30),   # yaw rate Ki gain                ±20% → ±30%
+    #     'kd_omega_y_range':     (0.50, 1.50),   # yaw rate Kd gain                ±35% → ±50%
+    # }
+
+    # ==========================================================================
+    # SPAWN RANDOMIZATION
+    # Controls where drones are spawned relative to gates during curriculum resets.
+    # ==========================================================================
+    spawn_cfg = {
+        'spawn_circle_scale':   3.0,    # radius of random spawn circle around gate
+        'spawn_lateral_expand': 3.0,    # lateral spread of spawn positions
+        'spawn_before_min':     0.5,    # min distance spawned before (approaching) the gate
+        'spawn_before_max':     4.0,    # max distance spawned before the gate
+        'spawn_after_min':      0.5,    # min distance spawned after (past) the gate
+        'spawn_after_max':      4.0,    # max distance spawned after the gate
+        'spawn_z_min':          0.05,   # min vertical spawn offset
+        'spawn_z_max':          3.0,    # max vertical spawn offset
+    }
 
     env_cfg.is_train = True
     env_cfg.rewards = rewards
     env_cfg.reset_time = args_cli.reset_time
+
+    # Pass reward shaping, DR ranges, and spawn config to env
+    env_cfg.reward_shaping = reward_shaping
+    env_cfg.dr_ranges = dr_ranges
+    env_cfg.gate_detection_expand = reward_shaping['gate_detection_expand']
+    for k, v in spawn_cfg.items():
+        setattr(env_cfg, k, v)
 
     # Override thrust_to_weight if specified
     if args_cli.thrust_to_weight is not None:
