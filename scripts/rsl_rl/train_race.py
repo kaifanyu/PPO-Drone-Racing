@@ -170,6 +170,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         'roll_pitch_rates_reward_scale':        roll_pitch_rates_reward_scale,
         'yaw_rate_reward_scale':                yaw_rate_reward_scale,
         'velocity_toward_gate_reward_scale':    velocity_toward_gate_reward_scale,
+        'height_align_reward_scale': -2.0,   # negative since it's a penalty
     }
 
     # ==========================================================================
@@ -179,7 +180,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     reward_shaping = {
         'gate_pass_bonus':      1.0,    # sparse bonus magnitude for a clean gate pass
         'gate_miss_penalty':   -1.0,    # sparse penalty magnitude for clipping the gate
-        'vel_blend_ratio':      0.7,    # fraction of velocity reward aimed at current gate
+        'vel_blend_ratio':      0.9,    # fraction of velocity reward aimed at current gate
                                         # (1 - vel_blend_ratio) aimed at next gate 0.8, 0.5, 0.95
         'lap_count_threshold':  3,      # number of laps before lap-incomplete penalty stops
         'gate_detection_expand': 1.4,   # expanded gate half-width multiplier for miss detection

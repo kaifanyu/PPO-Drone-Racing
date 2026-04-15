@@ -195,7 +195,7 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["backward_crossing"]  # adds extra backwards_crossing key 
+            extra_keys = ["backward_crossing", "height_align_reward"]  # adds extra backwards_crossing key 
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -600,6 +600,11 @@ class DefaultQuadcopterStrategy:
             vel_toward_gate = (vel_w * blended_dir).sum(dim=1).clamp(min=0.0)
             velocity_reward = vel_toward_gate * self.env.rew['velocity_toward_gate_reward_scale']
 
+            drone_pos = self.env._robot.data.root_link_pos_w
+            xy_dist_to_gate = torch.norm(gate_centers[:, :2] - drone_pos[:, :2], dim=1)
+            z_error = torch.abs(gate_centers[:, 2] - drone_pos[:, 2])
+            close_mask = (xy_dist_to_gate < 2.0).float()   # only within 2m XY
+            height_align_reward = close_mask * z_error * self.env.rew['height_align_reward_scale']
             # Aggregate all components
             rewards = {
                 "progress_goal": progress_reward,
@@ -609,6 +614,7 @@ class DefaultQuadcopterStrategy:
                 "yaw_rate": yaw_rate_penalty,
                 "backward_crossing": backward_penalty,
                 "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
+                "height_align_reward": height_align_reward
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             
