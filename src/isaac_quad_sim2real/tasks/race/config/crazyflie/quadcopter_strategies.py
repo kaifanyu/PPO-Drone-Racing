@@ -195,7 +195,7 @@ class DefaultQuadcopterStrategy:
                 if key != "death_cost" and value is not None
             ]
 
-            extra_keys = ["backward_crossing", "height_align_reward"]  # adds extra backwards_crossing key 
+            extra_keys = ["backward_crossing", "height_align_reward", "gate_center_reward"]  # adds extra backwards_crossing key
 
             self._episode_sums = {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -347,7 +347,12 @@ class DefaultQuadcopterStrategy:
         gate_missed = crossed_gate_correct_direction & crossed_inside_expanded_gate & (~crossed_inside_gate)
         crossed_gate_backward = ((prev_drone_position < 0.0) & (current_drone_position_X >= 0.0) & crossed_inside_expanded_gate)
 
-        return gate_passed, gate_missed, crossed_gate_backward
+        # Gate center quality: 1.0 at dead center, 0.0 at gate edge, only on forward crossings
+        dist_to_center = torch.sqrt(current_drone_position_Y ** 2 + current_drone_position_Z ** 2)
+        quality = (1.0 - torch.clamp(dist_to_center / gate_half, 0.0, 1.0))
+        gate_center_quality = quality * (crossed_gate_correct_direction & crossed_inside_gate).float()
+
+        return gate_passed, gate_missed, crossed_gate_backward, gate_center_quality
     
     def _calculate_progress_reward(
         self,
@@ -492,7 +497,8 @@ class DefaultQuadcopterStrategy:
         vel_blend_ratio      = _rs.get('vel_blend_ratio',       0.8)
         lap_count_threshold  = _rs.get('lap_count_threshold',   3)
         crash_mask_steps     = _rs.get('crash_mask_steps',      100)
-        expand               = _rs.get('gate_detection_expand', 1.4)
+        expand                   = _rs.get('gate_detection_expand', 1.4)
+        gate_center_reward_scale = _rs.get('gate_center_reward_scale', 0.0)
 
         # Gate setup
         pose_gate = self.env._pose_drone_wrt_gate  # [x,y,z] in gate frame
@@ -512,7 +518,7 @@ class DefaultQuadcopterStrategy:
         self.env._crashed = self.env._crashed + crashed * mask
 
         # Gate Cross detection
-        gate_passed, gate_missed, gate_crossed_backward = self._detect_gate_crossing(
+        gate_passed, gate_missed, gate_crossed_backward, gate_center_quality = self._detect_gate_crossing(
             current_gate_position=pose_gate,
             prev_gate_position=self._prev_pose_drone_wrt_gate,
             expanded_half=expanded_half,
@@ -614,7 +620,8 @@ class DefaultQuadcopterStrategy:
                 "yaw_rate": yaw_rate_penalty,
                 "backward_crossing": backward_penalty,
                 "velocity_toward_gate": velocity_reward,   # <-- ADD THIS
-                "height_align_reward": height_align_reward
+                "height_align_reward": height_align_reward,
+                "gate_center_reward": gate_center_quality * gate_center_reward_scale,
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             
