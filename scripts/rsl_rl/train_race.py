@@ -184,6 +184,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                         # (1 - vel_blend_ratio) aimed at next gate 0.8, 0.5, 0.95
         'lap_count_threshold':  3,      # number of laps before lap-incomplete penalty stops
         'gate_detection_expand': 1.4,   # expanded gate half-width multiplier for miss detection
+        'gate_success_scale': 0.85,     # tighter success window: drone must pass within 85% of gate half-width
         'gate_center_reward_scale': 300.0,  # reward for passing through gate center (1.0 = dead center, 0.0 = edge) 200, 400, 300, try: 250
         'crash_mask_steps':     100,    # steps before crash detection activates each episode
     }

@@ -308,7 +308,7 @@ class DefaultQuadcopterStrategy:
         current_gate_position: torch.Tensor,
         prev_gate_position: torch.Tensor,
         expanded_half: float,
-        gate_half: float,
+        success_half: float,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Gate local frame: 
@@ -330,10 +330,10 @@ class DefaultQuadcopterStrategy:
         # cross the gate going forward (+x -> x <= 0)
         crossed_gate_correct_direction = (prev_drone_position > 0.0) & (current_drone_position_X <= 0.0)
         
-        # check if drone fit through gate
+        # check if drone fit through gate (tighter success window)
         crossed_inside_gate = (
-            (torch.abs(current_drone_position_Y) <= gate_half) &
-            (torch.abs(current_drone_position_Z) <= gate_half)
+            (torch.abs(current_drone_position_Y) <= success_half) &
+            (torch.abs(current_drone_position_Z) <= success_half)
         )
         
         # 3) Allow an expanded detection window for misses, if provided
@@ -347,9 +347,9 @@ class DefaultQuadcopterStrategy:
         gate_missed = crossed_gate_correct_direction & crossed_inside_expanded_gate & (~crossed_inside_gate)
         crossed_gate_backward = ((prev_drone_position < 0.0) & (current_drone_position_X >= 0.0) & crossed_inside_expanded_gate)
 
-        # Gate center quality: 1.0 at dead center, 0.0 at gate edge, only on forward crossings
+        # Gate center quality: 1.0 at dead center, 0.0 at success window edge, only on forward crossings
         dist_to_center = torch.sqrt(current_drone_position_Y ** 2 + current_drone_position_Z ** 2)
-        quality = (1.0 - torch.clamp(dist_to_center / gate_half, 0.0, 1.0))
+        quality = (1.0 - torch.clamp(dist_to_center / success_half, 0.0, 1.0))
         gate_center_quality = quality * (crossed_gate_correct_direction & crossed_inside_gate).float()
 
         return gate_passed, gate_missed, crossed_gate_backward, gate_center_quality
@@ -499,12 +499,14 @@ class DefaultQuadcopterStrategy:
         crash_mask_steps     = _rs.get('crash_mask_steps',      100)
         expand                   = _rs.get('gate_detection_expand', 1.4)
         gate_center_reward_scale = _rs.get('gate_center_reward_scale', 0.0)
+        gate_success_scale       = _rs.get('gate_success_scale', 1.0)
 
         # Gate setup
         pose_gate = self.env._pose_drone_wrt_gate  # [x,y,z] in gate frame
         gate_half = getattr(self.env._gate_model_cfg_data, "gate_side", 1.0) * 0.5 \
             if hasattr(self.env, "_gate_model_cfg_data") else 0.5
         expanded_half = gate_half * expand
+        success_half  = gate_half * gate_success_scale
 
         gate_centers = self.env._waypoints[self.env._idx_wp, :3]
         self.env._desired_pos_w[:] = gate_centers   # desired pos = gate centers
@@ -522,7 +524,7 @@ class DefaultQuadcopterStrategy:
             current_gate_position=pose_gate,
             prev_gate_position=self._prev_pose_drone_wrt_gate,
             expanded_half=expanded_half,
-            gate_half=gate_half,
+            success_half=success_half,
         )
         # includes ALL envs that crossed the plane (passed OR missed)
         crossed_gate_correct_direction = gate_passed | gate_missed
