@@ -655,8 +655,8 @@ class DefaultQuadcopterStrategy:
                     "backward_crossing": backward_penalty,
                     "velocity_toward_gate": velocity_reward,
                     "height_align_reward": height_align_reward,
-                    "gate_center_reward": gate_center_quality * gate_center_reward_scale,
-                    "lateral_vel_penalty": lateral_vel_penalty,
+                    # "gate_center_reward": gate_center_quality * gate_center_reward_scale,
+                    # "lateral_vel_penalty": lateral_vel_penalty,
                 }
                 reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
 
